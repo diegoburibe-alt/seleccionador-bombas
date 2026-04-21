@@ -1,462 +1,1201 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
-from scipy.interpolate import PchipInterpolator
-from scipy.optimize import curve_fit, brentq
 import os
-from fpdf import FPDF
+import re
+import math
+import base64
+import tempfile
+from typing import Dict, List, Optional, Tuple
 
-# Tolerancias y Margenes
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+from scipy.interpolate import PchipInterpolator
+from scipy.optimize import brentq, curve_fit
+
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except Exception:
+    Image = None
+    ImageDraw = None
+    ImageFont = None
+
+
+# ==============================
+# Configuración general
+# ==============================
 NPSH_MARGIN_M = 0.5
-# Tamaños estándar de motores IEC (kW)
+VALID_USERNAME = "Diego"
+VALID_PASSWORD = "Vog1234"
+APP_SUBTITLE = "Series N-NP-N(V)"
+APP_TITLE = "Seleccionador Bombas Normalizadas"
+
 IEC_MOTORS_KW = [
     0.18, 0.25, 0.37, 0.55, 0.75, 1.1, 1.5, 2.2, 3.0, 4.0, 5.5, 7.5,
-    11, 15, 18.5, 22, 30, 37, 45, 55, 75, 90, 110, 132, 160, 200, 250, 315, 355, 400, 500, 630
+    11, 15, 18.5, 22, 30, 37, 45, 55, 75, 90, 110, 132, 160, 200, 250,
+    315, 355, 400, 500, 630,
 ]
 
-def get_service_factor(power_kw):
-    """ Factor de servicio estándar corporativo API/ISO """
+
+# ==============================
+# Utilidades visuales
+# ==============================
+def build_vogt_icon() -> Optional[str]:
+    """Genera un ícono simple con una V azul para reemplazar la rueda dentada."""
+    if Image is None:
+        return None
+
+    icon_path = os.path.join(tempfile.gettempdir(), "vogt_v_icon.png")
+    if os.path.exists(icon_path):
+        return icon_path
+
+    img = Image.new("RGBA", (64, 64), (255, 255, 255, 0))
+    draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle((2, 2, 62, 62), radius=14, fill=(0, 89, 170, 255))
+
+    try:
+        font = ImageFont.truetype("DejaVuSans-Bold.ttf", 40)
+    except Exception:
+        font = ImageFont.load_default()
+
+    text = "V"
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+    draw.text(((64 - tw) / 2, (64 - th) / 2 - 2), text, fill=(255, 255, 255, 255), font=font)
+    img.save(icon_path)
+    return icon_path
+
+
+def find_logo_path() -> Optional[str]:
+    possible_paths = [
+        "Logo Vogt.svg",
+        "Logo_Vogt.svg",
+        "logo_vogt.svg",
+        "logo_vogt.png",
+        "Logo Vogt.png",
+        os.path.join(os.getcwd(), "Logo Vogt.svg"),
+        os.path.join(os.getcwd(), "logo_vogt.svg"),
+        "/mnt/data/Logo Vogt.svg",
+        "/mnt/data/logo_vogt.svg",
+        "/mnt/data/Logo Vogt.png",
+    ]
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def svg_to_base64(path: str) -> str:
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8")
+
+
+PAGE_ICON = build_vogt_icon()
+st.set_page_config(
+    layout="wide",
+    page_title=APP_TITLE,
+    page_icon=PAGE_ICON if PAGE_ICON else None,
+)
+
+
+def inject_css() -> None:
+    st.markdown(
+        """
+        <style>
+            .main-block {padding-top: 0.6rem;}
+            .vogt-badge {
+                width: 54px;
+                height: 54px;
+                border-radius: 14px;
+                background: #0059aa;
+                color: white;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 34px;
+                font-weight: 900;
+                box-shadow: 0 6px 18px rgba(0, 89, 170, 0.18);
+                flex-shrink: 0;
+            }
+            .vogt-logo-text {
+                color: #0059aa;
+                font-weight: 900;
+                font-size: 2.4rem;
+                letter-spacing: 0.04rem;
+                margin: 0;
+                line-height: 1;
+            }
+            .app-title {
+                font-size: 2rem;
+                font-weight: 800;
+                line-height: 1.1;
+                margin: 0;
+                color: #1f2937;
+            }
+            .app-subtitle {
+                color: #4b5563;
+                font-weight: 700;
+                margin-top: 0.25rem;
+            }
+            .menu-card {
+                border: 1px solid #d7dee8;
+                border-radius: 16px;
+                padding: 1rem 1.2rem;
+                background: #ffffff;
+                min-height: 110px;
+            }
+            .menu-card h4 {
+                margin: 0 0 0.4rem 0;
+                color: #0f172a;
+            }
+            .small-note {
+                font-size: 0.92rem;
+                color: #4b5563;
+            }
+            .stDataFrame, .stTable {font-size: 0.95rem;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+inject_css()
+
+
+# ==============================
+# Modelo hidráulico
+# ==============================
+def get_service_factor(power_kw: float) -> float:
     if power_kw < 22:
         return 1.15
-    elif power_kw < 55:
+    if power_kw < 55:
         return 1.10
-    else:
-        return 1.05
+    return 1.05
 
-def select_motor(max_power_kw):
+
+def select_motor(max_power_kw: float) -> float:
     req_power = max_power_kw * get_service_factor(max_power_kw)
-    for m in IEC_MOTORS_KW:
-        if m >= req_power:
-            return m
+    for motor_kw in IEC_MOTORS_KW:
+        if motor_kw >= req_power:
+            return motor_kw
     return IEC_MOTORS_KW[-1]
 
-def poly2(x, a, b, c):
-    """ Ecuación H-Q estándar H = a*Q^2 + b*Q + c """
-    return a * (x**2) + b * x + c
+
+def poly2(x: np.ndarray, a: float, b: float, c: float) -> np.ndarray:
+    return a * (x ** 2) + b * x + c
+
+
+def infer_poles_from_rpm(rpm: Optional[float]) -> Optional[int]:
+    if rpm is None or pd.isna(rpm):
+        return None
+    rpm = float(rpm)
+    if rpm >= 2500:
+        return 2
+    if rpm >= 1200:
+        return 4
+    return 6
+
+
+def discharge_from_model(modelo: str) -> Optional[int]:
+    if not modelo:
+        return None
+    m = re.match(r"\s*(\d+)\s*-", str(modelo))
+    return int(m.group(1)) if m else None
+
+
+def safe_float(value, default=np.nan) -> float:
+    try:
+        return float(str(value).replace(",", ".").strip())
+    except Exception:
+        return default
+
 
 class PumpCurveBase:
-    """ Representa una curva de ensayo experimental (Laboratorio) """
-    def __init__(self, diam, puntos):
-        self.diam = diam
-        self.puntos = puntos
-        q_raw = np.array([p['Q'] for p in puntos])
-        h_raw = np.array([p['H'] for p in puntos])
-        eta_raw = np.array([p['eta'] for p in puntos])
-        npsh_raw = np.array([p['NPSH'] for p in puntos])
+    def __init__(self, diam: float, puntos: List[Dict[str, float]]) -> None:
+        self.diam = float(diam)
+        self.puntos = sorted(puntos, key=lambda p: p["Q"])
 
-        # Ajuste H-Q
+        q_raw = np.array([p["Q"] for p in self.puntos], dtype=float)
+        h_raw = np.array([p["H"] for p in self.puntos], dtype=float)
+        eta_raw = np.array([p["eta"] for p in self.puntos], dtype=float)
+        npsh_raw = np.array([p["NPSH"] for p in self.puntos], dtype=float)
+
         self.popt_h, _ = curve_fit(poly2, q_raw, h_raw)
         self.a, self.b, self.c = self.popt_h
 
-        # Validación de estabilidad (Control de pendiente anómala)
         if self.a < 0 and self.b > 0:
-            self.stable_q_min = -self.b / (2 * self.a)
+            self.stable_q_min = max(0.0, -self.b / (2 * self.a))
         else:
             self.stable_q_min = 0.0
 
-        sort_idx = np.argsort(q_raw)
-        q_sort = q_raw[sort_idx]
-        eta_sort = eta_raw[sort_idx]
-        npsh_sort = npsh_raw[sort_idx]
-
-        unique_q, unique_idx = np.unique(q_sort, return_index=True)
+        unique_q, unique_idx = np.unique(q_raw, return_index=True)
         self.unique_q = unique_q
-        self.interp_eta = PchipInterpolator(unique_q, eta_sort[unique_idx])
-        self.interp_npsh = PchipInterpolator(unique_q, npsh_sort[unique_idx])
+        self.eta_values = eta_raw[unique_idx]
+        self.npsh_values = npsh_raw[unique_idx]
 
-        self.q_min = min(unique_q)
-        self.q_max = max(unique_q)
+        self.interp_eta = PchipInterpolator(self.unique_q, self.eta_values)
+        self.interp_npsh = PchipInterpolator(self.unique_q, self.npsh_values)
 
-        # Identificar BEP (Best Efficiency Point)
-        qq = np.linspace(max(0.1, self.q_min), self.q_max, 200)
+        self.q_min = float(np.min(self.unique_q))
+        self.q_max = float(np.max(self.unique_q))
+
+        qq = np.linspace(max(0.1, self.q_min), self.q_max, 240)
         ee = self.interp_eta(qq)
-        idx_bep = np.argmax(ee)
-        self.q_bep = qq[idx_bep]
-        self.eta_bep = ee[idx_bep]
+        idx_bep = int(np.argmax(ee))
+        self.q_bep = float(qq[idx_bep])
+        self.eta_bep = float(ee[idx_bep])
 
-    def get_h(self, q):
-        return poly2(q, *self.popt_h)
+    def get_h(self, q: float) -> float:
+        return float(poly2(np.array([q]), *self.popt_h)[0])
+
+    def get_eta(self, q: float) -> float:
+        q_eval = float(np.clip(q, self.unique_q[0], self.unique_q[-1]))
+        return float(self.interp_eta(q_eval))
+
+    def get_npshr(self, q: float) -> float:
+        q_eval = float(np.clip(q, self.unique_q[0], self.unique_q[-1]))
+        return float(self.interp_npsh(q_eval))
+
+    def get_power(self, q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
+        h = self.get_h(q)
+        eta = max(0.01, self.get_eta(q) * viscosity_cf)
+        power_w = (q / 3600.0) * h * density * 9.81 / (eta / 100.0)
+        return float(power_w / 1000.0)
+
 
 class TrimmedCurve:
-    """ Curva escalada mediante leyes de similitud de afinidad """
-    def __init__(self, base_curve, trim_diam):
+    def __init__(self, base_curve: PumpCurveBase, trim_diam: float) -> None:
         self.base = base_curve
-        self.diam = trim_diam
-        self.ratio = trim_diam / base_curve.diam
+        self.diam = float(trim_diam)
+        self.ratio = self.diam / self.base.diam
 
-    def get_h(self, q):
-        if self.ratio <= 0: return 0
+    def get_h(self, q: float) -> float:
         q_base = q / self.ratio
-        return (self.ratio**2) * self.base.get_h(q_base)
+        return (self.ratio ** 2) * self.base.get_h(q_base)
 
-    def get_eta(self, q):
-        if self.ratio <= 0: return 0
+    def get_eta(self, q: float) -> float:
         q_base = q / self.ratio
-        q_eval = np.clip(q_base, self.base.unique_q[0], self.base.unique_q[-1])
-        base_eta = float(self.base.interp_eta(q_eval))
-        # Penalización real por recorte empírico
-        penalty = max(0, 1.0 - self.ratio) * 10.0  # Reducción porcentual lineal severa
-        return max(0, base_eta - penalty)
+        base_eta = self.base.get_eta(q_base)
+        penalty = max(0.0, 1.0 - self.ratio) * 10.0
+        return max(0.0, base_eta - penalty)
 
-    def get_npshr(self, q):
-        if self.ratio <= 0: return 0
+    def get_npshr(self, q: float) -> float:
         q_base = q / self.ratio
-        q_eval = np.clip(q_base, self.base.unique_q[0], self.base.unique_q[-1])
-        base_npsh = float(self.base.interp_npsh(q_eval))
-        return base_npsh * (self.ratio**2)
+        return self.base.get_npshr(q_base) * (self.ratio ** 2)
 
-    def get_power(self, q, density=1000.0, viscosity_cf=1.0):
-        # Viscosity_cf es de la metodología del Hydraulic Institute
+    def get_power(self, q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
         h = self.get_h(q)
-        eta = self.get_eta(q) * viscosity_cf
-        if eta <= 0: return float('inf')
+        eta = max(0.01, self.get_eta(q) * viscosity_cf)
         power_w = (q / 3600.0) * h * density * 9.81 / (eta / 100.0)
-        return power_w / 1000.0
+        return float(power_w / 1000.0)
 
-    def get_max_power(self, end_q, density=1000.0, viscosity_cf=1.0):
-        qq = np.linspace(0.1, end_q, 100)
-        powers = [self.get_power(qi, density, viscosity_cf) for qi in qq]
-        return max(powers)
+    def get_max_power(self, end_q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
+        qq = np.linspace(max(0.1, 0.02 * end_q), max(end_q, 0.1), 120)
+        powers = [self.get_power(qi, density=density, viscosity_cf=viscosity_cf) for qi in qq]
+        return float(max(powers)) if powers else 0.0
+
 
 class SystemCurve:
-    def __init__(self, h_stat, k):
-        self.h_stat = h_stat
-        self.k = k
-    def get_h(self, q):
-        return self.h_stat + self.k * (q**2)
+    def __init__(self, h_stat: float, k: float) -> None:
+        self.h_stat = float(h_stat)
+        self.k = float(k)
+
+    def get_h(self, q: float) -> float:
+        return self.h_stat + self.k * (q ** 2)
+
 
 class PumpDatabase:
-    def __init__(self):
-        self.families = []
+    def __init__(self) -> None:
+        self.families: List[Dict] = []
 
-    def load_from_csv(self, file_obj):
-        df = pd.read_csv(file_obj, sep=';', decimal='.')
+    def load_from_csv(self, file_obj) -> None:
+        df = pd.read_csv(file_obj, sep=";", decimal=".")
         df.columns = [str(col).strip() for col in df.columns]
 
-        vital_cols = ['Marca', 'modelo', 'diametro_mm', 'Q_m3/h', 'H_m']
-        for c in vital_cols:
-            if c not in df.columns:
-                raise ValueError(f"Falta columna vital requerida: {c}")
+        vital_cols = ["Marca", "modelo", "diametro_mm", "Q_m3/h", "H_m"]
+        for col in vital_cols:
+            if col not in df.columns:
+                raise ValueError(f"Falta columna vital requerida: {col}")
 
-        has_rpm = 'RPM' in df.columns
-        groupby_cols = ['Marca', 'modelo', 'RPM'] if has_rpm else ['Marca', 'modelo']
+        series_col = "Serie" if "Serie" in df.columns else None
+        has_rpm = "RPM" in df.columns
+
+        groupby_cols = []
+        if series_col:
+            groupby_cols.append(series_col)
+        groupby_cols += ["Marca", "modelo"]
+        if has_rpm:
+            groupby_cols.append("RPM")
 
         self.families = []
-        for name, group in df.groupby(groupby_cols):
-            if has_rpm:
-                marca, modelo, rpm_val = name
-            else:
-                marca, modelo = name
-                rpm_val = None
+        for name, group in df.groupby(groupby_cols, dropna=False):
+            name = name if isinstance(name, tuple) else (name,)
+            idx = 0
+            serie = None
+            if series_col:
+                serie = str(name[idx]) if pd.notna(name[idx]) else "-"
+                idx += 1
+            marca = str(name[idx])
+            idx += 1
+            modelo = str(name[idx])
+            idx += 1
+            rpm_val = safe_float(name[idx]) if has_rpm else np.nan
+            rpm_val = None if np.isnan(rpm_val) else float(rpm_val)
 
-            diametros = group['diametro_mm'].dropna().astype(float).unique()
-            if len(diametros) == 0: continue
-            
-            d_max = float(max(diametros))
-            d_min = float(min(diametros))
-            known_diameters = sorted(list(diametros))
+            diametros = sorted(group["diametro_mm"].dropna().astype(float).unique().tolist())
+            if not diametros:
+                continue
 
-            curvas = []
-            for d in known_diameters:
-                group_d = group[group['diametro_mm'].astype(float) == d]
-                puntos = []
+            curvas: List[PumpCurveBase] = []
+            for d in diametros:
+                group_d = group[group["diametro_mm"].astype(float) == d]
+                puntos: List[Dict[str, float]] = []
                 for _, row in group_d.iterrows():
-                    try:
-                        p = {
-                            'Q': float(str(row['Q_m3/h']).replace(',', '.')),
-                            'H': float(str(row['H_m']).replace(',', '.')),
-                            'eta': float(str(row.get('h_%', '0')).replace(',', '.')),
-                            'NPSH': float(str(row.get('NPSH_m', '0')).replace(',', '.'))
-                        }
-                        puntos.append(p)
-                    except:
-                        pass
-                
+                    q = safe_float(row["Q_m3/h"])
+                    h = safe_float(row["H_m"])
+                    eta = safe_float(row.get("h_%", row.get("eta", 0.0)), 0.0)
+                    npsh = safe_float(row.get("NPSH_m", row.get("NPSH", 0.0)), 0.0)
+                    if not np.isnan(q) and not np.isnan(h):
+                        puntos.append({"Q": q, "H": h, "eta": eta, "NPSH": npsh})
+
                 if len(puntos) >= 3:
                     try:
                         curvas.append(PumpCurveBase(d, puntos))
-                    except:
-                        pass
-            
-            if not curvas: continue
-            
-            self.families.append({
-                'marca': str(marca),
-                'modelo': str(modelo),
-                'rpm': rpm_val if pd.notna(rpm_val) else None,
-                'D_max': d_max,
-                'D_min': d_min,
-                'curvas': sorted(curvas, key=lambda c: c.diam)
-            })
+                    except Exception:
+                        continue
 
-    def get_families(self):
+            if not curvas:
+                continue
+
+            curvas = sorted(curvas, key=lambda c: c.diam)
+            self.families.append(
+                {
+                    "serie": serie if serie else marca,
+                    "marca": marca,
+                    "modelo": modelo,
+                    "rpm": rpm_val,
+                    "polos": infer_poles_from_rpm(rpm_val),
+                    "descarga_dn": discharge_from_model(modelo),
+                    "D_min": float(min(diametros)),
+                    "D_max": float(max(diametros)),
+                    "diametros_disponibles": [float(d) for d in diametros],
+                    "curvas": curvas,
+                }
+            )
+
+    def get_families(self) -> List[Dict]:
         return self.families
 
-def find_trim_diameter(q_req, h_req, base_curve):
-    def objective(ratio):
-        if ratio <= 0: return -1e9
-        q_base = q_req / ratio
-        return (ratio**2) * base_curve.get_h(q_base) - h_req
 
-    min_ratio = 0.5
-    max_ratio = 1.1
+# ==============================
+# Cálculo hidráulico
+# ==============================
+def find_trim_diameter(
+    q_req: float,
+    h_req: float,
+    base_curve: PumpCurveBase,
+    d_min: float,
+    d_max: float,
+) -> Optional[float]:
+    if d_min > d_max or d_min <= 0:
+        return None
+
+    min_ratio = max(0.01, d_min / base_curve.diam)
+    max_ratio = min(1.0, d_max / base_curve.diam)
+    if min_ratio > max_ratio:
+        return None
+
+    def objective(ratio: float) -> float:
+        q_base = q_req / ratio
+        return (ratio ** 2) * base_curve.get_h(q_base) - h_req
+
     try:
         f_min = objective(min_ratio)
         f_max = objective(max_ratio)
+
+        if f_min == 0:
+            return base_curve.diam * min_ratio
+        if f_max == 0:
+            return base_curve.diam * max_ratio
         if f_min * f_max > 0:
-            return None # Sin cruce
-        ratio_opt = brentq(objective, min_ratio, max_ratio, xtol=1e-4)
-        return base_curve.diam * ratio_opt
+            return None
+
+        ratio_opt = brentq(objective, min_ratio, max_ratio, xtol=1e-5)
+        d_req = base_curve.diam * ratio_opt
+
+        if d_min <= d_req <= d_max:
+            return float(d_req)
+        return None
     except Exception:
         return None
 
-def find_operating_point(trim_curve, sys_curve, q_max=None):
-    if q_max is None:
-        q_max = trim_curve.base.q_max * trim_curve.ratio * 1.5
 
-    def objective(q):
+def find_operating_point(
+    trim_curve: TrimmedCurve,
+    sys_curve: Optional[SystemCurve],
+    q_max: Optional[float] = None,
+) -> Optional[float]:
+    if sys_curve is None:
+        return None
+
+    q_upper = q_max if q_max is not None else trim_curve.base.q_max * trim_curve.ratio * 1.35
+    q_upper = max(q_upper, 0.5)
+
+    def objective(q: float) -> float:
         return trim_curve.get_h(q) - sys_curve.get_h(q)
 
     try:
-        if objective(0.001) < 0:
-            return None # Bomba no vence altura estática
-        q_op = brentq(objective, 0.001, q_max)
-        return q_op
-    except:
+        q0 = 0.001
+        if objective(q0) < 0:
+            return None
+        return float(brentq(objective, q0, q_upper))
+    except Exception:
         return None
 
-def create_datasheet(result, q_req, h_req, npsha, density, fluid_name):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("helvetica", "B", 16)
-    pdf.cell(190, 10, "Hoja de Datos Tecnicos - Ingenieria", ln=True, align='C')
-    pdf.ln(10)
 
-    pdf.set_font("helvetica", "B", 12)
-    pdf.cell(190, 8, f"Equipo: {result['Proveedor']} {result['Modelo']} ({result['RPM Nominal']} RPM)", ln=True)
+def viscosity_correction(viscosidad_cst: float) -> float:
+    if viscosidad_cst <= 1.0:
+        return 1.0
+    if viscosidad_cst <= 5.0:
+        return 0.97
+    if viscosidad_cst <= 20.0:
+        return 0.93
+    return 0.88
 
-    pdf.set_font("helvetica", "", 12)
-    pdf.cell(190, 8, f"Punto de Diseno: Q = {q_req} m3/h | H = {h_req} m", ln=True)
-    pdf.cell(190, 8, f"Fluido: {fluid_name} | Dens = {density} kg/m3", ln=True)
-    pdf.cell(190, 8, f"NPSH Disponible (NPSHa): {npsha} m", ln=True)
-    pdf.ln(5)
 
-    pdf.set_font("helvetica", "B", 12)
-    pdf.cell(190, 8, "Resultados Hidraulicos Operativos:", ln=True)
+# ==============================
+# Construcción de vistas
+# ==============================
+def init_session_state() -> None:
+    defaults = {
+        "authenticated": False,
+        "username": "",
+        "screen": "Menú principal",
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
-    pdf.set_font("helvetica", "", 12)
-    pdf.cell(190, 8, f"- Diametro Mecanizado: {result['D_Impulsor_mm']:.2f} mm", ln=True)
-    pdf.cell(190, 8, f"- Punto Op. Real en Sistema: Q = {result['Q_Op_m3h']:.2f} m3/h", ln=True)
-    pdf.cell(190, 8, f"- Eficiencia Nominal: {result['Eficiencia_pct']:.2f} %", ln=True)
-    pdf.cell(190, 8, f"- Potencia Absorbida Eje: {result['Potencia_kW']:.2f} kW", ln=True)
-    pdf.cell(190, 8, f"- Sugerencia Motor IEC: {result['Motor_IEC_kW']:.2f} kW (Base curva max)", ln=True)
 
-    npshr = result['NPSHr_m']
-    status = "APROBADO" if result['Status_NPSH'] else "RECHAZADO (Peligro Cavitacion)"
-    pdf.cell(190, 8, f"- NPSH Requerido: {npshr:.2f} m -> Status: {status}", ln=True)
+init_session_state()
 
-    pdf_path = f"Datasheet_{result['Modelo']}.pdf".replace("/", "_")
-    pdf.output(pdf_path)
-    return pdf_path
 
-st.set_page_config(layout="wide", page_title="Seleccionador Corporativo V3", page_icon="⚙️")
+def render_top_header() -> None:
+    logo_path = find_logo_path()
+    col_logo, col_title = st.columns([1.3, 5], vertical_alignment="center")
 
-def main():
-    st.title("⚙️ Seleccionador Corporativo de Equipos de Bombeo")
-    st.markdown("Arquitectura Desacoplada | Normativa ANSI/HI & ISO | Motores IEC | Trazabilidad")
+    with col_logo:
+        if logo_path and logo_path.lower().endswith(".svg"):
+            b64 = svg_to_base64(logo_path)
+            st.markdown(
+                f"""
+                <div style="display:flex; align-items:center; height:72px;">
+                    <img src="data:image/svg+xml;base64,{b64}" style="max-height:60px; width:auto;">
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        elif logo_path:
+            st.image(logo_path, width=150)
+        else:
+            st.markdown("<div class='vogt-logo-text'>VOGT</div>", unsafe_allow_html=True)
+
+    with col_title:
+        st.markdown(
+            f"""
+            <div style='display:flex; align-items:center; gap:0.9rem;'>
+                <div class='vogt-badge'>V</div>
+                <div>
+                    <div class='app-title'>{APP_TITLE}</div>
+                    <div class='app-subtitle'>{APP_SUBTITLE}</div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+# ==============================
+# Login
+# ==============================
+def login_view() -> None:
+    render_top_header()
+    st.markdown("<div class='main-block'></div>", unsafe_allow_html=True)
+
+    c1, c2, c3 = st.columns([1.2, 1.3, 1.2])
+    with c2:
+        st.markdown("### Acceso")
+        with st.form("login_form", clear_on_submit=False):
+            username = st.text_input("Usuario")
+            password = st.text_input("Contraseña", type="password")
+            submit = st.form_submit_button("Ingresar", use_container_width=True)
+
+        if submit:
+            if username == VALID_USERNAME and password == VALID_PASSWORD:
+                st.session_state.authenticated = True
+                st.session_state.username = username
+                st.rerun()
+            else:
+                st.error("Usuario o contraseña incorrectos.")
+
+
+# ==============================
+# Carga y resumen de base
+# ==============================
+def build_catalog_df(families: List[Dict]) -> pd.DataFrame:
+    rows = []
+    for fam in families:
+        rows.append(
+            {
+                "Serie (Marca)": fam["serie"],
+                "Marca": fam["marca"],
+                "Modelo": fam["modelo"],
+                "Polos": fam["polos"],
+                "RPM": fam["rpm"],
+                "Descarga DN": fam["descarga_dn"],
+                "D mín. (mm)": fam["D_min"],
+                "D máx. (mm)": fam["D_max"],
+                "Diámetros disponibles": ", ".join(
+                    str(int(d)) if float(d).is_integer() else f"{d:.1f}"
+                    for d in fam["diametros_disponibles"]
+                ),
+                "_fam": fam,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def load_database_widget() -> Tuple[Optional[PumpDatabase], Optional[List[Dict]]]:
+    uploaded_file = st.sidebar.file_uploader("Cargar Base Oficial (CSV)", type=["csv"])
+    if uploaded_file is None:
+        st.info("Carga la base CSV para habilitar la selección.")
+        return None, None
 
     db = PumpDatabase()
+    try:
+        db.load_from_csv(uploaded_file)
+        families = db.get_families()
+        st.sidebar.success(f"Base cargada: {len(families)} familias activas")
+        return db, families
+    except Exception as exc:
+        st.error(f"Error de integridad en CSV: {exc}")
+        return None, None
+
+
+# ==============================
+# Resultados por punto hidráulico
+# ==============================
+def evaluate_families(
+    families: List[Dict],
+    q_req: float,
+    h_req: float,
+    npsha: float,
+    densidad: float,
+    viscosidad: float,
+    usar_sistema: bool,
+    h_est: float,
+    k_sys: float,
+) -> List[Dict]:
+    sys_curve = SystemCurve(h_stat=h_est, k=k_sys) if usar_sistema else None
+    visco_cf = viscosity_correction(viscosidad)
+    results: List[Dict] = []
+
+    for fam in families:
+        base_curve = fam["curvas"][-1]
+        d_req = find_trim_diameter(q_req, h_req, base_curve, fam["D_min"], fam["D_max"])
+        if d_req is None:
+            continue
+
+        if not (fam["D_min"] <= d_req <= fam["D_max"]):
+            continue
+
+        if base_curve.stable_q_min > q_req:
+            continue
+
+        trim_curve = TrimmedCurve(base_curve, d_req)
+        op_q = find_operating_point(
+            trim_curve,
+            sys_curve,
+            q_max=base_curve.q_max * trim_curve.ratio,
+        )
+        if op_q is None:
+            op_q = q_req
+
+        h_op = trim_curve.get_h(op_q)
+        eta_op = trim_curve.get_eta(op_q) * visco_cf
+        p_kw = trim_curve.get_power(op_q, density=densidad, viscosity_cf=visco_cf)
+        npshr = trim_curve.get_npshr(op_q)
+        end_op = base_curve.q_max * trim_curve.ratio
+        p_max = trim_curve.get_max_power(end_op, density=densidad, viscosity_cf=visco_cf)
+        motor_kw = select_motor(p_max)
+        npsh_status = npsha >= (npshr + NPSH_MARGIN_M)
+
+        results.append(
+            {
+                "Serie (Marca)": fam["serie"],
+                "Marca": fam["marca"],
+                "Modelo": fam["modelo"],
+                "Polos": fam["polos"],
+                "RPM": fam["rpm"],
+                "D_Impulsor (mm)": round(d_req, 1),
+                "Q Op. (m3/h)": round(op_q, 2),
+                "H Op. (m)": round(h_op, 2),
+                "Eficiencia (%)": round(eta_op, 2),
+                "Potencia (kW)": round(p_kw, 2),
+                "NPSHr (m)": round(npshr, 2),
+                "Status NPSH": npsh_status,
+                "Motor IEC (kW)": motor_kw,
+                "_trim": trim_curve,
+                "_fam": fam,
+                "_sys_curve": sys_curve,
+                "_q_req": q_req,
+                "_h_req": h_req,
+                "_visco_cf": visco_cf,
+                "_densidad": densidad,
+            }
+        )
+
+    results.sort(key=lambda x: (-x["Status NPSH"], -x["Eficiencia (%)"], x["Potencia (kW)"]))
+    return results
+
+
+def npsh_style(val):
+    if isinstance(val, bool) and not val:
+        return "background-color: #fde2e1"
+    return ""
+
+
+# ==============================
+# Gráficos
+# ==============================
+def metric_label(metric: str) -> str:
+    return {
+        "H": "Altura H (m)",
+        "ETA": "Eficiencia (%)",
+        "P": "Potencia (kW)",
+        "NPSH": "NPSHr (m)",
+    }[metric]
+
+
+def curve_values(
+    curve_obj,
+    metric: str,
+    q_values: np.ndarray,
+    density: float = 1000.0,
+    visco_cf: float = 1.0,
+) -> List[float]:
+    values: List[float] = []
+    for q in q_values:
+        if metric == "H":
+            values.append(curve_obj.get_h(float(q)))
+        elif metric == "ETA":
+            eta = curve_obj.get_eta(float(q)) if hasattr(curve_obj, "get_eta") else 0.0
+            values.append(float(eta * visco_cf))
+        elif metric == "P":
+            values.append(float(curve_obj.get_power(float(q), density=density, viscosity_cf=visco_cf)))
+        elif metric == "NPSH":
+            values.append(float(curve_obj.get_npshr(float(q))))
+    return values
+
+
+def plot_family_metric(
+    fam: Dict,
+    metric: str,
+    title: str,
+    show_all_diameters: bool,
+    selected_trim: Optional[TrimmedCurve] = None,
+    selected_real_diam: Optional[float] = None,
+    op_q: Optional[float] = None,
+    q_req: Optional[float] = None,
+    h_req: Optional[float] = None,
+    sys_curve: Optional[SystemCurve] = None,
+    density: float = 1000.0,
+    visco_cf: float = 1.0,
+) -> go.Figure:
+    fig = go.Figure()
+
+    base_curves = fam["curvas"] if show_all_diameters else []
+    if show_all_diameters:
+        for curve in base_curves:
+            qq = np.linspace(curve.q_min, curve.q_max, 140)
+            fig.add_trace(
+                go.Scatter(
+                    x=qq,
+                    y=curve_values(curve, metric, qq, density=density, visco_cf=visco_cf),
+                    mode="lines",
+                    name=f"D={curve.diam:.0f} mm",
+                    line=dict(width=1.5, color="rgba(130,130,130,0.75)"),
+                    hovertemplate="Q: %{x:.2f} m³/h<br>Valor: %{y:.2f}<extra></extra>",
+                )
+            )
+
+    if selected_trim is not None:
+        q_max_plot = selected_trim.base.q_max * selected_trim.ratio
+        qq_sel = np.linspace(
+            max(0.05, selected_trim.base.q_min * selected_trim.ratio),
+            q_max_plot,
+            180,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=qq_sel,
+                y=curve_values(selected_trim, metric, qq_sel, density=density, visco_cf=visco_cf),
+                mode="lines",
+                name=(
+                    f"Diámetro escogido = {selected_trim.diam:.1f} mm"
+                    if selected_real_diam is None
+                    else f"D = {selected_real_diam:.1f} mm"
+                ),
+                line=dict(width=3, color="#0059aa"),
+                hovertemplate="Q: %{x:.2f} m³/h<br>Valor: %{y:.2f}<extra></extra>",
+            )
+        )
+    elif not show_all_diameters and fam["curvas"]:
+        curve = min(
+            fam["curvas"],
+            key=lambda c: abs(c.diam - (selected_real_diam or fam["curvas"][-1].diam)),
+        )
+        qq = np.linspace(curve.q_min, curve.q_max, 140)
+        fig.add_trace(
+            go.Scatter(
+                x=qq,
+                y=curve_values(curve, metric, qq, density=density, visco_cf=visco_cf),
+                mode="lines",
+                name=f"D={curve.diam:.0f} mm",
+                line=dict(width=3, color="#0059aa"),
+            )
+        )
+
+    if metric == "H" and sys_curve is not None:
+        q_lim = max([c.q_max for c in fam["curvas"]] + [q_req or 0.0])
+        qq_sys = np.linspace(0.0, max(1.2 * q_lim, 1.0), 160)
+        fig.add_trace(
+            go.Scatter(
+                x=qq_sys,
+                y=[sys_curve.get_h(float(q)) for q in qq_sys],
+                mode="lines",
+                name="Curva del sistema",
+                line=dict(width=2, color="#f59e0b", dash="dash"),
+            )
+        )
+
+    if metric == "H" and q_req is not None and h_req is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=[q_req],
+                y=[h_req],
+                mode="markers",
+                name="Punto requerido",
+                marker=dict(size=10, color="#ef4444", symbol="x"),
+            )
+        )
+
+    if op_q is not None and selected_trim is not None:
+        if metric == "H":
+            op_y = selected_trim.get_h(op_q)
+        elif metric == "ETA":
+            op_y = selected_trim.get_eta(op_q) * visco_cf
+        elif metric == "P":
+            op_y = selected_trim.get_power(op_q, density=density, viscosity_cf=visco_cf)
+        else:
+            op_y = selected_trim.get_npshr(op_q)
+
+        fig.add_trace(
+            go.Scatter(
+                x=[op_q],
+                y=[op_y],
+                mode="markers",
+                name="Punto operativo",
+                marker=dict(size=11, color="#dc2626"),
+            )
+        )
+
+    fig.update_layout(
+        title=title,
+        template="plotly_white",
+        height=380,
+        margin=dict(l=15, r=15, t=55, b=15),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.0),
+    )
+    fig.update_xaxes(
+        title_text="Caudal Q (m³/h)",
+        showgrid=True,
+        gridcolor="rgba(200,200,200,0.35)",
+        zeroline=False,
+    )
+    fig.update_yaxes(
+        title_text=metric_label(metric),
+        showgrid=True,
+        gridcolor="rgba(200,200,200,0.35)",
+        zeroline=False,
+    )
+    return fig
+
+
+def render_characteristic_curves(
+    fam: Dict,
+    title_prefix: str,
+    show_all_diameters: bool,
+    selected_trim: Optional[TrimmedCurve] = None,
+    selected_real_diam: Optional[float] = None,
+    op_q: Optional[float] = None,
+    q_req: Optional[float] = None,
+    h_req: Optional[float] = None,
+    sys_curve: Optional[SystemCurve] = None,
+    density: float = 1000.0,
+    visco_cf: float = 1.0,
+) -> None:
+    st.subheader("Curvas Caracteristicas")
+    c1, c2 = st.columns(2)
+    c3, c4 = st.columns(2)
+
+    with c1:
+        st.plotly_chart(
+            plot_family_metric(
+                fam=fam,
+                metric="H",
+                title=f"{title_prefix} · H-Q",
+                show_all_diameters=show_all_diameters,
+                selected_trim=selected_trim,
+                selected_real_diam=selected_real_diam,
+                op_q=op_q,
+                q_req=q_req,
+                h_req=h_req,
+                sys_curve=sys_curve,
+                density=density,
+                visco_cf=visco_cf,
+            ),
+            use_container_width=True,
+        )
+
+    with c2:
+        st.plotly_chart(
+            plot_family_metric(
+                fam=fam,
+                metric="ETA",
+                title=f"{title_prefix} · Eficiencia-Q",
+                show_all_diameters=show_all_diameters,
+                selected_trim=selected_trim,
+                selected_real_diam=selected_real_diam,
+                op_q=op_q,
+                density=density,
+                visco_cf=visco_cf,
+            ),
+            use_container_width=True,
+        )
+
+    with c3:
+        st.plotly_chart(
+            plot_family_metric(
+                fam=fam,
+                metric="P",
+                title=f"{title_prefix} · Potencia-Q",
+                show_all_diameters=show_all_diameters,
+                selected_trim=selected_trim,
+                selected_real_diam=selected_real_diam,
+                op_q=op_q,
+                density=density,
+                visco_cf=visco_cf,
+            ),
+            use_container_width=True,
+        )
+
+    with c4:
+        st.plotly_chart(
+            plot_family_metric(
+                fam=fam,
+                metric="NPSH",
+                title=f"{title_prefix} · NPSHr-Q",
+                show_all_diameters=show_all_diameters,
+                selected_trim=selected_trim,
+                selected_real_diam=selected_real_diam,
+                op_q=op_q,
+                density=density,
+                visco_cf=visco_cf,
+            ),
+            use_container_width=True,
+        )
+
+
+def family_curve_summary_table(fam: Dict) -> pd.DataFrame:
+    rows = []
+    for curve in fam["curvas"]:
+        rows.append(
+            {
+                "Diámetro (mm)": curve.diam,
+                "Q mín. (m3/h)": round(curve.q_min, 2),
+                "Q máx. (m3/h)": round(curve.q_max, 2),
+                "H @ Q mín. (m)": round(curve.get_h(curve.q_min), 2),
+                "H @ Q máx. (m)": round(curve.get_h(curve.q_max), 2),
+                "Q BEP (m3/h)": round(curve.q_bep, 2),
+                "η BEP (%)": round(curve.eta_bep, 2),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+# ==============================
+# Pantallas principales
+# ==============================
+def hydraulic_selection_view(families: List[Dict]) -> None:
+    st.sidebar.header("1. Parámetros del Fluido")
+    fluid_name = st.sidebar.text_input("Fluido", "Agua limpia")
+    densidad = st.sidebar.number_input("Densidad (kg/m³)", value=1000.0, step=10.0)
+    viscosidad = st.sidebar.number_input("Viscosidad cinemática (cSt)", value=1.0, step=0.5)
+
+    st.sidebar.header("2. Punto de Operación")
+    q_req = st.sidebar.number_input("Caudal solicitado Q (m³/h)", value=50.0, step=1.0)
+    h_req = st.sidebar.number_input("Altura solicitada H (m)", value=30.0, step=1.0)
+    npsha = st.sidebar.number_input("NPSH disponible (m)", value=10.0, step=0.5)
+
+    st.sidebar.header("3. Curva del Sistema")
+    usar_sistema = st.sidebar.checkbox("Considerar curva del sistema", value=True)
+    h_est = st.sidebar.number_input("Carga estática (m)", value=0.0, disabled=not usar_sistema)
+    k_calc = (h_req - h_est) / (q_req ** 2) if q_req > 0 else 0.0
+    k_sys = st.sidebar.number_input(
+        "Coef. fricción sistema (k)",
+        value=float(k_calc),
+        format="%.6f",
+        disabled=not usar_sistema,
+    )
+
+    st.sidebar.header("4. Visualización")
+    show_all_diameters = st.sidebar.radio(
+        "Diámetros a mostrar",
+        ["Solo el escogido para el punto", "Todos los diámetros de la bomba seleccionada"],
+        index=0,
+    ) == "Todos los diámetros de la bomba seleccionada"
+
+    st.markdown("### Selección de Bombas por punto hidraulico")
+    st.caption(f"Fluido: {fluid_name} · Densidad: {densidad:.1f} kg/m³ · Viscosidad: {viscosidad:.1f} cSt")
+
+    results = evaluate_families(
+        families=families,
+        q_req=q_req,
+        h_req=h_req,
+        npsha=npsha,
+        densidad=densidad,
+        viscosidad=viscosidad,
+        usar_sistema=usar_sistema,
+        h_est=h_est,
+        k_sys=k_sys,
+    )
+
+    if not results:
+        st.warning("No se encontraron bombas que cumplan con el punto solicitado dentro del rango real de diámetros del modelo.")
+        return
+
+    st.subheader("Bombas que cumplen con los requisitos")
+    df_res = pd.DataFrame(results).drop(
+        columns=["_trim", "_fam", "_sys_curve", "_q_req", "_h_req", "_visco_cf", "_densidad"]
+    )
+
+    ordered_cols = [
+        "Serie (Marca)",
+        "Marca",
+        "Modelo",
+        "Polos",
+        "RPM",
+        "D_Impulsor (mm)",
+        "Q Op. (m3/h)",
+        "H Op. (m)",
+        "Eficiencia (%)",
+        "Potencia (kW)",
+        "NPSHr (m)",
+        "Status NPSH",
+    ]
+    df_res = df_res[ordered_cols]
+
+    st.dataframe(
+        df_res.style.map(npsh_style, subset=["Status NPSH"]),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.markdown("---")
+
+    labels = [
+        f"{r['Serie (Marca)']} | {r['Modelo']} | {r['Polos']} polos | η={r['Eficiencia (%)']:.2f}% | D={r['D_Impulsor (mm)']:.1f} mm"
+        for r in results
+    ]
+    selected_idx = st.selectbox(
+        "Selecciona una bomba para revisar curvas",
+        range(len(results)),
+        format_func=lambda i: labels[i],
+    )
+
+    selected = results[selected_idx]
+    fam = selected["_fam"]
+    trim_curve = selected["_trim"]
+
+    detail_cols = st.columns(5)
+    detail_cols[0].metric("Serie", selected["Serie (Marca)"])
+    detail_cols[1].metric("Modelo", selected["Modelo"])
+    detail_cols[2].metric("Diámetro escogido", f"{selected['D_Impulsor (mm)']:.1f} mm")
+    detail_cols[3].metric("Punto operativo", f"Q={selected['Q Op. (m3/h)']:.2f} | H={selected['H Op. (m)']:.2f}")
+    detail_cols[4].metric("NPSH", "OK" if selected["Status NPSH"] else "Revisar")
+
+    render_characteristic_curves(
+        fam=fam,
+        title_prefix=f"{selected['Modelo']} · {selected['Polos']} polos",
+        show_all_diameters=show_all_diameters,
+        selected_trim=trim_curve,
+        selected_real_diam=selected["D_Impulsor (mm)"],
+        op_q=selected["Q Op. (m3/h)"],
+        q_req=q_req,
+        h_req=h_req,
+        sys_curve=selected["_sys_curve"],
+        density=densidad,
+        visco_cf=selected["_visco_cf"],
+    )
+
+    st.markdown("#### Datos de la bomba seleccionada")
+    st.dataframe(
+        family_curve_summary_table(fam),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+def manual_selection_view(families: List[Dict]) -> None:
+    st.markdown("### Seleccion de Bombas Manual")
+    catalog_df = build_catalog_df(families)
+    if catalog_df.empty:
+        st.warning("La base cargada no contiene familias utilizables.")
+        return
+
+    st.sidebar.header("Filtros selección manual")
+    available_series = sorted([x for x in catalog_df["Serie (Marca)"].dropna().unique().tolist()])
+    available_poles = sorted([int(x) for x in catalog_df["Polos"].dropna().unique().tolist()])
+    available_dn = sorted([int(x) for x in catalog_df["Descarga DN"].dropna().unique().tolist()])
+
+    filter_series = st.sidebar.multiselect("Serie (Marca)", available_series)
+    filter_poles = st.sidebar.multiselect("Número de polos", available_poles)
+    filter_dn = st.sidebar.multiselect("Diámetro de descarga", available_dn)
+    model_search = st.sidebar.text_input("Buscar modelo")
+    show_all_diameters = st.sidebar.radio(
+        "Diámetros a mostrar",
+        ["Todos los diámetros disponibles", "Solo un diámetro"],
+        index=0,
+    ) == "Todos los diámetros disponibles"
+
+    filtered = catalog_df.copy()
+    if filter_series:
+        filtered = filtered[filtered["Serie (Marca)"].isin(filter_series)]
+    if filter_poles:
+        filtered = filtered[filtered["Polos"].isin(filter_poles)]
+    if filter_dn:
+        filtered = filtered[filtered["Descarga DN"].isin(filter_dn)]
+    if model_search:
+        filtered = filtered[filtered["Modelo"].astype(str).str.contains(model_search, case=False, na=False)]
+
+    if filtered.empty:
+        st.warning("No hay modelos que coincidan con los filtros aplicados.")
+        return
+
+    st.subheader("Lista completa de modelos")
+    st.dataframe(filtered.drop(columns=["_fam"]), use_container_width=True, hide_index=True)
+
+    selection_labels = [
+        f"{row['Serie (Marca)']} | {row['Modelo']} | {int(row['Polos']) if pd.notna(row['Polos']) else '-'} polos | DN {int(row['Descarga DN']) if pd.notna(row['Descarga DN']) else '-'}"
+        for _, row in filtered.iterrows()
+    ]
+
+    selection_index = st.selectbox(
+        "Selecciona una bomba",
+        range(len(filtered)),
+        format_func=lambda i: selection_labels[i],
+    )
+
+    selected_row = filtered.iloc[selection_index]
+    fam = selected_row["_fam"]
+
+    selected_real_diam = None
+    if not show_all_diameters:
+        selected_real_diam = st.selectbox(
+            "Diámetro a mostrar",
+            fam["diametros_disponibles"],
+            format_func=lambda x: f"{x:.1f} mm",
+        )
+
+    kpi_cols = st.columns(5)
+    kpi_cols[0].metric("Serie", str(selected_row["Serie (Marca)"]))
+    kpi_cols[1].metric("Modelo", str(selected_row["Modelo"]))
+    kpi_cols[2].metric("Polos", str(int(selected_row["Polos"])) if pd.notna(selected_row["Polos"]) else "-")
+    kpi_cols[3].metric("D mín. / D máx.", f"{selected_row['D mín. (mm)']:.1f} / {selected_row['D máx. (mm)']:.1f} mm")
+    kpi_cols[4].metric("Cantidad diámetros", str(len(fam["diametros_disponibles"])))
+
+    render_characteristic_curves(
+        fam=fam,
+        title_prefix=f"{selected_row['Modelo']} · {int(selected_row['Polos']) if pd.notna(selected_row['Polos']) else '-'} polos",
+        show_all_diameters=show_all_diameters,
+        selected_real_diam=selected_real_diam,
+        density=1000.0,
+        visco_cf=1.0,
+    )
+
+    st.markdown("#### Diámetros presentes en la base de datos")
+    st.dataframe(
+        family_curve_summary_table(fam),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+def main_menu_view(families: List[Dict]) -> None:
+    st.markdown("## Menu principal")
+    st.markdown(
+        """
+        <div class='menu-card'>
+            <h4>1. Selección de Bombas por punto hidraulico</h4>
+            <div class='small-note'>Evalúa el punto Q-H requerido, calcula diámetro necesario y revisa curvas características.</div>
+        </div>
+        <br>
+        <div class='menu-card'>
+            <h4>2. Seleccion de Bombas Manual</h4>
+            <div class='small-note'>Explora la lista completa de modelos, filtra por serie, polos o diámetro de descarga y revisa sus curvas.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    view = st.radio(
+        "Ir a",
+        ["Selección de Bombas por punto hidraulico", "Seleccion de Bombas Manual"],
+        horizontal=True,
+    )
+
+    st.markdown("---")
+    if view == "Selección de Bombas por punto hidraulico":
+        hydraulic_selection_view(families)
+    else:
+        manual_selection_view(families)
+
+
+# ==============================
+# App principal
+# ==============================
+def app() -> None:
+    if not st.session_state.authenticated:
+        login_view()
+        return
+
+    render_top_header()
 
     with st.sidebar:
-        st.header("1. Parámetros del Fluido")
-        fluid_name = st.text_input("Fluido", "Agua Limpia")
-        densidad = st.number_input("Densidad (kg/m³)", value=1000.0, step=10.0)
-        viscosidad = st.number_input("Viscosidad Cinemática (cSt)", value=1.0, step=0.5)
+        st.success(f"Usuario conectado: {st.session_state.username}")
+        if st.button("Cerrar sesión", use_container_width=True):
+            st.session_state.authenticated = False
+            st.session_state.username = ""
+            st.rerun()
+        st.markdown("---")
 
-        st.header("2. Punto de Operación Requerido")
-        q_req = st.number_input("Caudal Solicitado Q (m³/h)", value=50.0, step=1.0)
-        h_req = st.number_input("Altura Solicitada H (m)", value=30.0, step=1.0)
-        npsha = st.number_input("NPSH Disponible (m)", value=10.0, step=0.5)
+    db, families = load_database_widget()
+    if not db or not families:
+        return
 
-        st.header("3. Curva del Sistema")
-        usar_sistema = st.checkbox("Considerar Curva de Sistema (Intersección Real)", value=True)
-        h_est = st.number_input("Carga Estática (m)", value=0.0, disabled=not usar_sistema)
-        k_calc = (h_req - h_est) / (q_req**2) if q_req > 0 else 0
-        k_sys = st.number_input("Coef. Fricción Sistema (k)", value=float(k_calc), format="%.6f", disabled=not usar_sistema)
+    main_menu_view(families)
 
-        st.header("4. Base de Datos")
-        uploaded_file = st.file_uploader("Cargar Base Oficial (CSV)", type=["csv"])
-
-    if uploaded_file is not None:
-        try:
-            db.load_from_csv(uploaded_file)
-            families = db.get_families()
-            st.success(f"✅ Base de datos verificada: {len(families)} familias estructurales activas.")
-        except Exception as e:
-            st.error(f"Error de Integridad en CSV: {e}")
-            return
-        
-        if usar_sistema:
-            sys_curve = SystemCurve(h_stat=h_est, k=k_sys)
-        else:
-            sys_curve = None
-
-        results = []
-        for fam in families:
-            valid_curves = [c for c in fam['curvas'] if c.get_h(q_req) >= h_req]
-            if valid_curves:
-                base_curve = valid_curves[0]
-            else:
-                base_curve = fam['curvas'][-1]
-
-            d_req = find_trim_diameter(q_req, h_req, base_curve)
-            
-            if d_req is not None and fam['D_min'] <= d_req <= fam['D_max'] * 1.05:
-                trim_curve = TrimmedCurve(base_curve, d_req)
-                
-                # Validacion Estricta de Estabilidad Hidráulica
-                if base_curve.stable_q_min > q_req:
-                    continue
-                    
-                if sys_curve is not None:
-                    op_q = find_operating_point(trim_curve, sys_curve, fam['curvas'][-1].q_max)
-                    if op_q is None:
-                        op_q = q_req
-                else:
-                    op_q = q_req
-
-                # Correccion visual de viscosidad estandar 1.0 si es agua
-                visco_cf = 1.0 if viscosidad <= 1.0 else 0.95 # Simplificacion HI para front-end
-                
-                eta_req = trim_curve.get_eta(op_q) * visco_cf
-                npshr = trim_curve.get_npshr(op_q)
-                p_kw = trim_curve.get_power(op_q, density=densidad, viscosity_cf=visco_cf)
-                
-                end_op = fam['curvas'][-1].q_max * trim_curve.ratio
-                p_max = trim_curve.get_max_power(end_op, density=densidad, viscosity_cf=visco_cf)
-                
-                npsh_status = (npsha >= npshr + NPSH_MARGIN_M)
-                
-                results.append({
-                    "Proveedor": fam['marca'],
-                    "Modelo": fam['modelo'],
-                    "RPM Nominal": fam['rpm'],
-                    "D_Impulsor (mm)": round(d_req, 1),
-                    "Q Op. (m3/h)": round(op_q, 1),
-                    "Eficiencia (%)": round(eta_req, 1),
-                    "NPSHr (m)": round(npshr, 2),
-                    "Potencia (kW)": round(p_kw, 2),
-                    "Motor IEC (kW)": select_motor(p_max),
-                    "Status NPSH": npsh_status,
-                    "_trim": trim_curve,
-                    "_fam": fam
-                })
-
-        if results:
-            results.sort(key=lambda x: x['Eficiencia (%)'], reverse=True)
-            df_res = pd.DataFrame(results)
-
-            st.subheader("🏆 Ranking Multicriterio (Norma API/ISO)")
-            df_disp = df_res.drop(columns=['_trim', '_fam'])
-
-            # La función de estilo en Streamlit a veces da problemas si no se aplica bien a rows. 
-            def hl_npsh(val):
-                color = '#ffcccc' if not val else ''
-                return f'background-color: {color}'
-            
-            st.dataframe(df_disp.style.format(precision=2).map(hl_npsh, subset=['Status NPSH']), use_container_width=True)
-
-            st.markdown("---")
-            st.subheader("📊 Análisis Energético y Curvas de Sistema")
-            res_options = df_res.to_dict('records')
-
-            idx = st.selectbox(
-                "Auditar Equipo:", 
-                range(len(res_options)), 
-                format_func=lambda i: f"{res_options[i]['Proveedor']} {res_options[i]['Modelo']} (Ef: {res_options[i]['Eficiencia (%)']}%)"
-            )
-            selected = res_options[idx]
-            tc = selected['_trim']
-            fam = selected['_fam']
-
-            fig = go.Figure()
-            q_plot = np.linspace(0, max(q_req*1.5, fam['curvas'][-1].q_max), 150)
-
-            # Cascada de ISO Curvas Reales (Negro)
-            for c in fam['curvas']:
-                fig.add_trace(go.Scatter(
-                    x=q_plot, 
-                    y=[c.get_h(qq) for qq in q_plot], 
-                    mode='lines', 
-                    name=f"Matriz D={c.diam}",
-                    line=dict(color='black', width=1),
-                    hovertemplate='Q: %{x:.2f} m³/h<br>H: %{y:.2f} m<extra></extra>'
-                ))
-
-            # Curva Operacional (Azul)
-            h_trim = [tc.get_h(qq) for qq in q_plot]
-            fig.add_trace(go.Scatter(
-                x=q_plot, 
-                y=h_trim, 
-                mode='lines', 
-                name=f"Recortada D={selected['D_Impulsor (mm)']}",
-                line=dict(color='blue', width=2),
-                hovertemplate='Q: %{x:.2f} m³/h<br>H: %{y:.2f} m<extra></extra>'
-            ))
-
-            # Interseccion de Curva de Sistema
-            if sys_curve is not None:
-                h_sys_plot = [sys_curve.get_h(qq) for qq in q_plot]
-                fig.add_trace(go.Scatter(
-                    x=q_plot, 
-                    y=h_sys_plot, 
-                    mode='lines', 
-                    name="Curva Sistema",
-                    line=dict(color='orange', dash='dash'),
-                    hovertemplate='Q: %{x:.2f} m³/h<br>H: %{y:.2f} m<extra></extra>'
-                ))
-
-            # Punto de Trabajo Operativo
-            op_q = selected['Q Op. (m3/h)']
-            fig.add_trace(go.Scatter(
-                x=[op_q], 
-                y=[tc.get_h(op_q)], 
-                mode='markers', 
-                name='Punto Op.',
-                marker=dict(color='red', size=12),
-                hovertemplate='Q: %{x:.2f} m³/h<br>H: %{y:.2f} m<extra></extra>'
-            ))
-
-            fig.update_layout(
-                title="Curva Hidráulica e Intersección", 
-                xaxis_title="Caudal Q (m³/h)", 
-                yaxis_title="Altura H (m)", 
-                template="plotly_white"
-            )
-            fig.update_xaxes(rangemode="tozero", minor=dict(ticks="inside", showgrid=True))
-            fig.update_yaxes(rangemode="tozero", minor=dict(ticks="inside", showgrid=True))
-            st.plotly_chart(fig, use_container_width=True)
-
-            if st.button("📄 Exportar Datasheet Oficial PDF"):
-                compatible_res = {
-                    'Proveedor': selected['Proveedor'],
-                    'Modelo': selected['Modelo'],
-                    'RPM Nominal': selected['RPM Nominal'],
-                    'D_Impulsor_mm': selected['D_Impulsor (mm)'],
-                    'Q_Op_m3h': selected['Q Op. (m3/h)'],
-                    'Eficiencia_pct': selected['Eficiencia (%)'],
-                    'Potencia_kW': selected['Potencia (kW)'],
-                    'Motor_IEC_kW': selected['Motor IEC (kW)'],
-                    'NPSHr_m': selected['NPSHr (m)'],
-                    'Status_NPSH': selected['Status NPSH']
-                }
-                pdf_path = create_datasheet(compatible_res, q_req, h_req, npsha, densidad, fluid_name)
-                
-                with open(pdf_path, "rb") as f:
-                    st.download_button("⬇️ Descargar Datasheet Compilado", f, file_name=f"Datasheet_{selected['Modelo']}.pdf", mime="application/pdf")
-        else:
-            st.warning("No se encontraron bombas que cumplan (Restricción física o de NPSH extremo).")
 
 if __name__ == "__main__":
-    main()
+    app()
