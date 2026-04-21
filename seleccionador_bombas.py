@@ -1,8 +1,6 @@
 import os
 import re
-import math
 import base64
-import tempfile
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -11,13 +9,6 @@ import plotly.graph_objects as go
 import streamlit as st
 from scipy.interpolate import PchipInterpolator
 from scipy.optimize import brentq, curve_fit
-
-try:
-    from PIL import Image, ImageDraw, ImageFont
-except Exception:
-    Image = None
-    ImageDraw = None
-    ImageFont = None
 
 
 # ==============================
@@ -39,31 +30,26 @@ IEC_MOTORS_KW = [
 # ==============================
 # Utilidades visuales
 # ==============================
-def build_vogt_icon() -> Optional[str]:
-    """Genera un ícono simple con una V azul para reemplazar la rueda dentada."""
-    if Image is None:
-        return None
+def file_to_base64(path: str) -> str:
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8")
 
-    icon_path = os.path.join(tempfile.gettempdir(), "vogt_v_icon.png")
-    if os.path.exists(icon_path):
-        return icon_path
 
-    img = Image.new("RGBA", (64, 64), (255, 255, 255, 0))
-    draw = ImageDraw.Draw(img)
-    draw.rounded_rectangle((2, 2, 62, 62), radius=14, fill=(0, 89, 170, 255))
+def svg_to_data_uri(path: str) -> str:
+    return f"data:image/svg+xml;base64,{file_to_base64(path)}"
 
-    try:
-        font = ImageFont.truetype("DejaVuSans-Bold.ttf", 40)
-    except Exception:
-        font = ImageFont.load_default()
 
-    text = "V"
-    bbox = draw.textbbox((0, 0), text, font=font)
-    tw = bbox[2] - bbox[0]
-    th = bbox[3] - bbox[1]
-    draw.text(((64 - tw) / 2, (64 - th) / 2 - 2), text, fill=(255, 255, 255, 255), font=font)
-    img.save(icon_path)
-    return icon_path
+def png_to_data_uri(path: str) -> str:
+    ext = os.path.splitext(path)[1].lower().replace(".", "")
+    if ext == "jpg":
+        ext = "jpeg"
+    return f"data:image/{ext};base64,{file_to_base64(path)}"
+
+
+def image_to_data_uri(path: str) -> str:
+    if path.lower().endswith(".svg"):
+        return svg_to_data_uri(path)
+    return png_to_data_uri(path)
 
 
 def find_logo_path() -> Optional[str]:
@@ -71,13 +57,18 @@ def find_logo_path() -> Optional[str]:
         "Logo Vogt.svg",
         "Logo_Vogt.svg",
         "logo_vogt.svg",
-        "logo_vogt.png",
         "Logo Vogt.png",
+        "logo_vogt.png",
         os.path.join(os.getcwd(), "Logo Vogt.svg"),
+        os.path.join(os.getcwd(), "Logo_Vogt.svg"),
         os.path.join(os.getcwd(), "logo_vogt.svg"),
+        os.path.join(os.getcwd(), "Logo Vogt.png"),
+        os.path.join(os.getcwd(), "logo_vogt.png"),
         "/mnt/data/Logo Vogt.svg",
+        "/mnt/data/Logo_Vogt.svg",
         "/mnt/data/logo_vogt.svg",
         "/mnt/data/Logo Vogt.png",
+        "/mnt/data/logo_vogt.png",
     ]
     for path in possible_paths:
         if os.path.exists(path):
@@ -85,12 +76,28 @@ def find_logo_path() -> Optional[str]:
     return None
 
 
-def svg_to_base64(path: str) -> str:
-    with open(path, "rb") as f:
-        return base64.b64encode(f.read()).decode("utf-8")
+def find_v_path() -> Optional[str]:
+    possible_paths = [
+        "V.svg",
+        "v.svg",
+        "V.png",
+        "v.png",
+        os.path.join(os.getcwd(), "V.svg"),
+        os.path.join(os.getcwd(), "v.svg"),
+        os.path.join(os.getcwd(), "V.png"),
+        os.path.join(os.getcwd(), "v.png"),
+        "/mnt/data/V.svg",
+        "/mnt/data/v.svg",
+        "/mnt/data/V.png",
+        "/mnt/data/v.png",
+    ]
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
+    return None
 
 
-PAGE_ICON = build_vogt_icon()
+PAGE_ICON = find_v_path()
 st.set_page_config(
     layout="wide",
     page_title=APP_TITLE,
@@ -103,40 +110,22 @@ def inject_css() -> None:
         """
         <style>
             .main-block {padding-top: 0.6rem;}
-            .vogt-badge {
-                width: 54px;
-                height: 54px;
-                border-radius: 14px;
-                background: #0059aa;
-                color: white;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                font-size: 34px;
-                font-weight: 900;
-                box-shadow: 0 6px 18px rgba(0, 89, 170, 0.18);
-                flex-shrink: 0;
-            }
-            .vogt-logo-text {
-                color: #0059aa;
-                font-weight: 900;
-                font-size: 2.4rem;
-                letter-spacing: 0.04rem;
-                margin: 0;
-                line-height: 1;
-            }
+
             .app-title {
-                font-size: 2rem;
+                font-size: 2.15rem;
                 font-weight: 800;
-                line-height: 1.1;
+                line-height: 1.08;
                 margin: 0;
                 color: #1f2937;
             }
+
             .app-subtitle {
                 color: #4b5563;
                 font-weight: 700;
-                margin-top: 0.25rem;
+                margin-top: 0.28rem;
+                font-size: 1.04rem;
             }
+
             .menu-card {
                 border: 1px solid #d7dee8;
                 border-radius: 16px;
@@ -144,14 +133,17 @@ def inject_css() -> None:
                 background: #ffffff;
                 min-height: 110px;
             }
+
             .menu-card h4 {
                 margin: 0 0 0.4rem 0;
                 color: #0f172a;
             }
+
             .small-note {
                 font-size: 0.92rem;
                 color: #4b5563;
             }
+
             .stDataFrame, .stTable {font-size: 0.95rem;}
         </style>
         """,
@@ -482,32 +474,49 @@ init_session_state()
 
 def render_top_header() -> None:
     logo_path = find_logo_path()
-    col_logo, col_title = st.columns([1.3, 5], vertical_alignment="center")
+    v_path = find_v_path()
+
+    col_logo, col_title = st.columns([2.2, 4.2], vertical_alignment="center")
 
     with col_logo:
-        if logo_path and logo_path.lower().endswith(".svg"):
-            b64 = svg_to_base64(logo_path)
+        if logo_path:
+            logo_uri = image_to_data_uri(logo_path)
             st.markdown(
                 f"""
-                <div style="display:flex; align-items:center; height:72px;">
-                    <img src="data:image/svg+xml;base64,{b64}" style="max-height:60px; width:auto;">
+                <div style="display:flex; align-items:center; height:140px;">
+                    <img src="{logo_uri}" style="max-height:120px; width:auto;">
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
-        elif logo_path:
-            st.image(logo_path, width=150)
         else:
-            st.markdown("<div class='vogt-logo-text'>VOGT</div>", unsafe_allow_html=True)
+            st.markdown(
+                "<div style='font-size:3rem; font-weight:900; color:#0059aa;'>VOGT</div>",
+                unsafe_allow_html=True,
+            )
 
     with col_title:
+        v_html = ""
+        if v_path:
+            v_uri = image_to_data_uri(v_path)
+            v_html = f'<img src="{v_uri}" style="height:74px; width:auto;">'
+        else:
+            v_html = """
+            <div style="
+                width:74px; height:74px; border-radius:18px;
+                background:#0059aa; color:white; display:flex;
+                align-items:center; justify-content:center;
+                font-size:42px; font-weight:900;
+            ">V</div>
+            """
+
         st.markdown(
             f"""
-            <div style='display:flex; align-items:center; gap:0.9rem;'>
-                <div class='vogt-badge'>V</div>
+            <div style="display:flex; align-items:center; gap:1rem; min-height:140px;">
+                {v_html}
                 <div>
-                    <div class='app-title'>{APP_TITLE}</div>
-                    <div class='app-subtitle'>{APP_SUBTITLE}</div>
+                    <div class="app-title">{APP_TITLE}</div>
+                    <div class="app-subtitle">{APP_SUBTITLE}</div>
                 </div>
             </div>
             """,
@@ -714,9 +723,8 @@ def plot_family_metric(
 ) -> go.Figure:
     fig = go.Figure()
 
-    base_curves = fam["curvas"] if show_all_diameters else []
     if show_all_diameters:
-        for curve in base_curves:
+        for curve in fam["curvas"]:
             qq = np.linspace(curve.q_min, curve.q_max, 140)
             fig.add_trace(
                 go.Scatter(
@@ -987,7 +995,7 @@ def hydraulic_selection_view(families: List[Dict]) -> None:
 
     st.subheader("Bombas que cumplen con los requisitos")
     df_res = pd.DataFrame(results).drop(
-        columns=["_trim", "_fam", "_sys_curve", "_q_req", "_h_req", "_visco_cf", "_densidad"]
+        columns=["_trim", "_fam", "_sys_curve", "_q_req", "_h_req", "_visco_cf", "_densidad", "Motor IEC (kW)"]
     )
 
     ordered_cols = [
