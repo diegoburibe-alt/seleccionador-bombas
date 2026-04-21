@@ -1,1 +1,14 @@
 Que el diametro solo esté entre el diametro maximo y minimo del modelo
+Cambiar "Seleccionador Corporativo de Equipos de Bombeo" Por "Seleccionador Bombas Normalizadas"
+Cambiar: Arquitectura Desacoplada | Normativa ANSI/HI & ISO | Motores IEC | Trazabilidad por "Series N-NP-N(V)
+Cambiar imagen de ruedita por V de vogt
+Poner Logo Vogt arriba
+cambiar: Ranking Multicriterio (Norma API/ISO) por "Bombas que cumplen con los requisitos"
+En la tabla de datos que despues de Q este H, luego eficiencia, luego potencia, luego npsh, sacar lo de motor
+cambiar: Análisis Energético y Curvas de Sistema por "Curvas Caracteristicas"
+Mostrar los 4 graficos y de forma distinta, mas facil a la lectura
+Que de la opcion si quiero mostrar todos los diametros de la bomba seleccionada o si quiero mostrar solo la escogida para el punto.
+
+Al ingresar que pida usuario y contraseña, por el momento usuario: Diego, clave: Vog1234
+Luego que diga menu principal y nos de dos opciones, la primera: Selección de Bombas por punto hidraulico y que abra la pestaña trabajada hasta el momento
+Luego la opcion de Seleccion de Bombas Manual y que salga la Lista completa de todos los modelos, Serie(Marca), polos, Que se pueda filtrar por diametro de descarga (numero antes del guion), por numero de polos, serie, etc y que al ingresar salga la curva con los diametros que estan en la base de datos, mostrando todos los gráficos
