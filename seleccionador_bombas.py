@@ -223,6 +223,19 @@ def keyify(prefix: str, value) -> str:
     return re.sub(r"[^a-zA-Z0-9_]+", "_", f"{prefix}_{value}")
 
 
+def display_serie_value(marca: str, serie: Optional[str] = None) -> str:
+    marca_txt = str(marca).strip().lower()
+    if "grundfos" in marca_txt:
+        return "N"
+    if "sempa" in marca_txt:
+        return "NP"
+    if "wilo" in marca_txt:
+        return "N (V)"
+    if serie is not None and str(serie).strip() not in ["", "-"] and not pd.isna(serie):
+        return str(serie)
+    return str(marca)
+
+
 # ==============================
 # Modelo hidráulico
 # ==============================
@@ -429,6 +442,7 @@ class PumpDatabase:
             self.families.append(
                 {
                     "serie": serie if serie else marca,
+                    "serie_display": display_serie_value(marca, serie),
                     "marca": marca,
                     "modelo": modelo,
                     "rpm": rpm_val,
@@ -703,8 +717,7 @@ def build_catalog_df(families: List[Dict]) -> pd.DataFrame:
     for fam in families:
         rows.append(
             {
-                "Serie (Marca)": fam["serie"],
-                "Marca": fam["marca"],
+                "Serie": fam["serie_display"],
                 "Modelo": fam["modelo"],
                 "Polos": float(fam["polos"]) if fam["polos"] is not None else np.nan,
                 "RPM": float(fam["rpm"]) if fam["rpm"] is not None else np.nan,
@@ -788,19 +801,27 @@ def plot_family_metric(
     sys_curve: Optional[SystemCurve] = None,
     density: float = 1000.0,
     visco_cf: float = 1.0,
+    black_curves: bool = False,
+    smooth_curves: bool = False,
 ) -> go.Figure:
     fig = go.Figure()
 
+    base_color = "rgba(0,0,0,0.75)" if black_curves else "rgba(130,130,130,0.75)"
+    selected_color = "#000000" if black_curves else "#0059aa"
+    n_points = 320 if smooth_curves else 140
+    n_points_selected = 420 if smooth_curves else 180
+    line_shape = "spline" if smooth_curves else "linear"
+
     if show_all_diameters:
         for curve in fam["curvas"]:
-            qq = np.linspace(curve.q_min, curve.q_max, 140)
+            qq = np.linspace(curve.q_min, curve.q_max, n_points)
             fig.add_trace(
                 go.Scatter(
                     x=qq,
                     y=curve_values(curve, metric, qq, density=density, visco_cf=visco_cf),
                     mode="lines",
                     name=f"D={curve.diam:.0f} mm",
-                    line=dict(width=1.5, color="rgba(130,130,130,0.75)"),
+                    line=dict(width=1.5, color=base_color, shape=line_shape),
                     hovertemplate="Q: %{x:.2f} m³/h<br>Valor: %{y:.2f}<extra></extra>",
                 )
             )
@@ -810,7 +831,7 @@ def plot_family_metric(
         qq_sel = np.linspace(
             max(0.05, selected_trim.base.q_min * selected_trim.ratio),
             q_max_plot,
-            180,
+            n_points_selected,
         )
         fig.add_trace(
             go.Scatter(
@@ -822,7 +843,7 @@ def plot_family_metric(
                     if selected_real_diam is None
                     else f"D = {selected_real_diam:.0f} mm"
                 ),
-                line=dict(width=3, color="#0059aa"),
+                line=dict(width=3, color=selected_color, shape=line_shape),
                 hovertemplate="Q: %{x:.2f} m³/h<br>Valor: %{y:.2f}<extra></extra>",
             )
         )
@@ -831,14 +852,14 @@ def plot_family_metric(
             fam["curvas"],
             key=lambda c: abs(c.diam - (selected_real_diam or fam["curvas"][-1].diam)),
         )
-        qq = np.linspace(curve.q_min, curve.q_max, 140)
+        qq = np.linspace(curve.q_min, curve.q_max, n_points_selected)
         fig.add_trace(
             go.Scatter(
                 x=qq,
                 y=curve_values(curve, metric, qq, density=density, visco_cf=visco_cf),
                 mode="lines",
                 name=f"D={curve.diam:.0f} mm",
-                line=dict(width=3, color="#0059aa"),
+                line=dict(width=3, color=selected_color, shape=line_shape),
                 hovertemplate="Q: %{x:.2f} m³/h<br>Valor: %{y:.2f}<extra></extra>",
             )
         )
@@ -932,6 +953,8 @@ def render_characteristic_curves(
     sys_curve: Optional[SystemCurve] = None,
     density: float = 1000.0,
     visco_cf: float = 1.0,
+    black_curves: bool = False,
+    smooth_curves: bool = False,
 ) -> None:
     st.subheader("Curvas Caracteristicas")
     c1, c2 = st.columns(2)
@@ -952,6 +975,8 @@ def render_characteristic_curves(
                 sys_curve=sys_curve,
                 density=density,
                 visco_cf=visco_cf,
+                black_curves=black_curves,
+                smooth_curves=smooth_curves,
             ),
             use_container_width=True,
         )
@@ -968,6 +993,8 @@ def render_characteristic_curves(
                 op_q=op_q,
                 density=density,
                 visco_cf=visco_cf,
+                black_curves=black_curves,
+                smooth_curves=smooth_curves,
             ),
             use_container_width=True,
         )
@@ -984,6 +1011,8 @@ def render_characteristic_curves(
                 op_q=op_q,
                 density=density,
                 visco_cf=visco_cf,
+                black_curves=black_curves,
+                smooth_curves=smooth_curves,
             ),
             use_container_width=True,
         )
@@ -1000,6 +1029,8 @@ def render_characteristic_curves(
                 op_q=op_q,
                 density=density,
                 visco_cf=visco_cf,
+                black_curves=black_curves,
+                smooth_curves=smooth_curves,
             ),
             use_container_width=True,
         )
@@ -1076,8 +1107,7 @@ def evaluate_families(
 
         results.append(
             {
-                "Serie (Marca)": fam["serie"],
-                "Marca": fam["marca"],
+                "Serie": fam["serie_display"],
                 "Modelo": fam["modelo"],
                 "Polos": float(fam["polos"]) if fam["polos"] is not None else np.nan,
                 "RPM": float(fam["rpm"]) if fam["rpm"] is not None else np.nan,
@@ -1104,6 +1134,15 @@ def evaluate_families(
 
 
 def hydraulic_selection_view(families: List[Dict]) -> None:
+    st.sidebar.header("0. Filtro de serie")
+    series_options = sorted(list({fam["serie_display"] for fam in families}))
+    selected_series = st.sidebar.multiselect("Serie", series_options)
+
+    if selected_series:
+        families_to_use = [fam for fam in families if fam["serie_display"] in selected_series]
+    else:
+        families_to_use = families
+
     st.sidebar.header("1. Parámetros del Fluido")
     fluid_name = st.sidebar.text_input("Fluido", "Agua limpia")
     densidad = st.sidebar.number_input("Densidad (kg/m³)", value=1000.0, step=10.0, format="%.2f")
@@ -1137,7 +1176,7 @@ def hydraulic_selection_view(families: List[Dict]) -> None:
     st.caption(f"Punto requerido: Q = {fmt1(q_req)} m³/h · H = {fmt1(h_req)} m")
 
     results = evaluate_families(
-        families=families,
+        families=families_to_use,
         q_req=q_req,
         h_req=h_req,
         npsha=npsha,
@@ -1158,8 +1197,7 @@ def hydraulic_selection_view(families: List[Dict]) -> None:
     )
 
     ordered_cols = [
-        "Serie (Marca)",
-        "Marca",
+        "Serie",
         "Modelo",
         "Polos",
         "RPM",
@@ -1182,7 +1220,7 @@ def hydraulic_selection_view(families: List[Dict]) -> None:
     st.markdown("---")
 
     labels = [
-        f"{r['Serie (Marca)']} | {r['Modelo']} | {fmt0(r['Polos'])} polos | η={fmt2(r['Eficiencia (%)'])}% | D={fmt0(r['D_Impulsor (mm)'])} mm"
+        f"{r['Serie']} | {r['Modelo']} | {fmt0(r['Polos'])} polos | η={fmt2(r['Eficiencia (%)'])}% | D={fmt0(r['D_Impulsor (mm)'])} mm"
         for r in results
     ]
     selected_idx = st.selectbox(
@@ -1198,7 +1236,7 @@ def hydraulic_selection_view(families: List[Dict]) -> None:
     st.markdown(f"#### {selected['Modelo']} · {fmt0(selected['Polos'])} polos")
 
     detail_cols = st.columns(5)
-    detail_cols[0].metric("Serie", selected["Serie (Marca)"])
+    detail_cols[0].metric("Serie", selected["Serie"])
     detail_cols[1].metric("Modelo", selected["Modelo"])
     detail_cols[2].metric("Diámetro aproximado", f"{fmt0(selected['D_Impulsor (mm)'])} mm")
     detail_cols[3].metric(
@@ -1296,12 +1334,12 @@ def manual_selection_view(families: List[Dict]) -> None:
 
         st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
 
-        series_options = sorted([x for x in catalog_df["Serie (Marca)"].dropna().unique().tolist()])
+        series_options = sorted([x for x in catalog_df["Serie"].dropna().unique().tolist()])
         model_options = sorted([x for x in catalog_df["Modelo"].dropna().unique().tolist()])
         poles_options = sorted([int(x) for x in catalog_df["Polos"].dropna().unique().tolist()])
         dn_options = sorted([int(x) for x in catalog_df["Descarga DN"].dropna().unique().tolist()])
 
-        with st.expander("Serie (Marca)", expanded=True):
+        with st.expander("Serie", expanded=True):
             selected_series = render_checkbox_filter_group(
                 series_options, "series", limit=5
             )
@@ -1327,7 +1365,7 @@ def manual_selection_view(families: List[Dict]) -> None:
     filtered = catalog_df.copy()
 
     if selected_series:
-        filtered = filtered[filtered["Serie (Marca)"].isin(selected_series)]
+        filtered = filtered[filtered["Serie"].isin(selected_series)]
     if selected_models:
         filtered = filtered[filtered["Modelo"].isin(selected_models)]
     if selected_poles:
@@ -1346,26 +1384,37 @@ def manual_selection_view(families: List[Dict]) -> None:
             st.warning("No hay modelos que coincidan con los filtros aplicados.")
             return
 
-        manual_table = pd.DataFrame(
+        table_display = pd.DataFrame(
             {
-                "Curva": ["Ver"] * len(filtered),
-                "Serie (Marca)": filtered["Serie (Marca)"],
+                "Seleccionar": [False] * len(filtered),
+                "Serie": filtered["Serie"],
                 "Modelo": filtered["Modelo"],
-                "Polos": filtered["Polos"],
-                "Impulsor actual [mm]": filtered["D máx. (mm)"].round().astype(int),
-                "Descarga DN": filtered["Descarga DN"],
-                "RPM": filtered["RPM"],
+                "Polos": filtered["Polos"].apply(fmt0),
+                "Impulsor actual [mm]": filtered["D máx. (mm)"].apply(fmt0),
+                "Descarga DN": filtered["Descarga DN"].apply(fmt0),
+                "RPM": filtered["RPM"].apply(fmt0),
             }
         )
 
-        st.dataframe(
-            style_numeric_df(
-                manual_table,
-                zero_dec_cols=["Polos", "Descarga DN", "RPM", "Impulsor actual [mm]"],
-            ),
+        edited_table = st.data_editor(
+            table_display,
             use_container_width=True,
             hide_index=True,
+            key="manual_selection_table",
+            disabled=["Serie", "Modelo", "Polos", "Impulsor actual [mm]", "Descarga DN", "RPM"],
+            column_config={
+                "Seleccionar": st.column_config.CheckboxColumn("Seleccionar", help="Selecciona una fila"),
+            },
         )
+
+        selected_rows = edited_table.index[edited_table["Seleccionar"]].tolist()
+        if len(selected_rows) > 1:
+            st.warning("Selecciona solo un modelo. Se usará la primera fila marcada.")
+
+        if len(selected_rows) >= 1:
+            selection_index = int(selected_rows[0])
+        else:
+            selection_index = 0
 
         st.markdown("---")
 
@@ -1375,17 +1424,6 @@ def manual_selection_view(families: List[Dict]) -> None:
             index=0,
             horizontal=True,
         ) == "Todos los diámetros disponibles"
-
-        selection_labels = [
-            f"{row['Serie (Marca)']} | {row['Modelo']} | {fmt0(row['Polos'])} polos | D máx = {fmt0(row['D máx. (mm)'])} mm"
-            for _, row in filtered.iterrows()
-        ]
-
-        selection_index = st.selectbox(
-            "Selecciona una bomba",
-            range(len(filtered)),
-            format_func=lambda i: selection_labels[i],
-        )
 
         selected_row = filtered.iloc[selection_index]
         fam = selected_row["_fam"]
@@ -1401,7 +1439,7 @@ def manual_selection_view(families: List[Dict]) -> None:
         st.markdown(f"#### {selected_row['Modelo']} · {fmt0(selected_row['Polos'])} polos")
 
         kpi_cols = st.columns(6)
-        kpi_cols[0].metric("Serie", str(selected_row["Serie (Marca)"]))
+        kpi_cols[0].metric("Serie", str(selected_row["Serie"]))
         kpi_cols[1].metric("Modelo", str(selected_row["Modelo"]))
         kpi_cols[2].metric("Polos", fmt0(selected_row["Polos"]))
         kpi_cols[3].metric("RPM", fmt0(selected_row["RPM"]))
@@ -1414,6 +1452,8 @@ def manual_selection_view(families: List[Dict]) -> None:
             selected_real_diam=selected_real_diam,
             density=1000.0,
             visco_cf=1.0,
+            black_curves=True,
+            smooth_curves=True,
         )
 
         st.markdown("#### Diámetros presentes en la base de datos")
