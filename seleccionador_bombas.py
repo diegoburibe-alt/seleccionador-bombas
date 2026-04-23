@@ -1,7 +1,7 @@
 import os
 import re
 import base64
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -26,9 +26,14 @@ IEC_MOTORS_KW = [
     315, 355, 400, 500, 630,
 ]
 
+st.set_page_config(
+    layout="wide",
+    page_title=APP_TITLE,
+)
+
 
 # ==============================
-# Utilidades visuales
+# Utilidades visuales / formato
 # ==============================
 def file_to_base64(path: str) -> str:
     with open(path, "rb") as f:
@@ -76,43 +81,14 @@ def find_logo_path() -> Optional[str]:
     return None
 
 
-def find_v_path() -> Optional[str]:
-    possible_paths = [
-        "V.svg",
-        "v.svg",
-        "V.png",
-        "v.png",
-        os.path.join(os.getcwd(), "V.svg"),
-        os.path.join(os.getcwd(), "v.svg"),
-        os.path.join(os.getcwd(), "V.png"),
-        os.path.join(os.getcwd(), "v.png"),
-        "/mnt/data/V.svg",
-        "/mnt/data/v.svg",
-        "/mnt/data/V.png",
-        "/mnt/data/v.png",
-    ]
-    for path in possible_paths:
-        if os.path.exists(path):
-            return path
-    return None
-
-
-PAGE_ICON = find_v_path()
-st.set_page_config(
-    layout="wide",
-    page_title=APP_TITLE,
-    page_icon=PAGE_ICON if PAGE_ICON else None,
-)
-
-
 def inject_css() -> None:
     st.markdown(
         """
         <style>
-            .main-block {padding-top: 0.6rem;}
+            .main-block {padding-top: 0.35rem;}
 
             .app-title {
-                font-size: 2.15rem;
+                font-size: 2.10rem;
                 font-weight: 800;
                 line-height: 1.08;
                 margin: 0;
@@ -122,29 +98,57 @@ def inject_css() -> None:
             .app-subtitle {
                 color: #4b5563;
                 font-weight: 700;
-                margin-top: 0.28rem;
-                font-size: 1.04rem;
+                margin-top: 0.22rem;
+                font-size: 1.00rem;
             }
 
             .menu-card {
                 border: 1px solid #d7dee8;
                 border-radius: 16px;
-                padding: 1rem 1.2rem;
+                padding: 1.15rem 1.2rem;
                 background: #ffffff;
-                min-height: 110px;
+                min-height: 150px;
             }
 
             .menu-card h4 {
-                margin: 0 0 0.4rem 0;
+                margin: 0 0 0.55rem 0;
                 color: #0f172a;
+                font-size: 1.10rem;
             }
 
             .small-note {
-                font-size: 0.92rem;
+                font-size: 0.95rem;
                 color: #4b5563;
             }
 
-            .stDataFrame, .stTable {font-size: 0.95rem;}
+            .filter-list-title {
+                font-size: 1.95rem;
+                font-weight: 700;
+                color: #0b4f96;
+                margin-bottom: 0.3rem;
+            }
+
+            .results-count {
+                font-size: 2.00rem;
+                font-weight: 800;
+                color: #0b4f96;
+                margin: 0 0 0.7rem 0;
+            }
+
+            .manual-panel {
+                border-right: 1px solid #d7dee8;
+                padding-right: 1rem;
+            }
+
+            .section-divider {
+                border-top: 1px solid #d7dee8;
+                margin-top: 0.75rem;
+                margin-bottom: 0.75rem;
+            }
+
+            .stDataFrame, .stTable {
+                font-size: 0.95rem;
+            }
         </style>
         """,
         unsafe_allow_html=True,
@@ -152,6 +156,53 @@ def inject_css() -> None:
 
 
 inject_css()
+
+
+def safe_float(value, default=np.nan) -> float:
+    try:
+        return float(str(value).replace(",", ".").strip())
+    except Exception:
+        return default
+
+
+def fmt2(value) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "-"
+    return f"{float(value):.2f}"
+
+
+def fmt0(value) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "-"
+    return f"{float(value):.0f}"
+
+
+def style_numeric_df(df: pd.DataFrame, zero_dec_cols: Optional[List[str]] = None):
+    zero_dec_cols = set(zero_dec_cols or [])
+    formatters = {}
+
+    for col in df.columns:
+        if pd.api.types.is_numeric_dtype(df[col]):
+            if col in zero_dec_cols:
+                formatters[col] = lambda x: "" if pd.isna(x) else f"{x:.0f}"
+            else:
+                formatters[col] = lambda x: "" if pd.isna(x) else f"{x:.2f}"
+
+    return df.style.format(formatters)
+
+
+def style_results_df(df: pd.DataFrame):
+    styler = style_numeric_df(df, zero_dec_cols=["RPM", "Polos"])
+    if "Status NPSH" in df.columns:
+        styler = styler.applymap(
+            lambda x: "background-color: #fde2e1" if x is False else "",
+            subset=["Status NPSH"]
+        )
+    return styler
+
+
+def keyify(prefix: str, value) -> str:
+    return re.sub(r"[^a-zA-Z0-9_]+", "_", f"{prefix}_{value}")
 
 
 # ==============================
@@ -193,13 +244,6 @@ def discharge_from_model(modelo: str) -> Optional[int]:
         return None
     m = re.match(r"\s*(\d+)\s*-", str(modelo))
     return int(m.group(1)) if m else None
-
-
-def safe_float(value, default=np.nan) -> float:
-    try:
-        return float(str(value).replace(",", ".").strip())
-    except Exception:
-        return default
 
 
 class PumpCurveBase:
@@ -327,10 +371,12 @@ class PumpDatabase:
             if series_col:
                 serie = str(name[idx]) if pd.notna(name[idx]) else "-"
                 idx += 1
+
             marca = str(name[idx])
             idx += 1
             modelo = str(name[idx])
             idx += 1
+
             rpm_val = safe_float(name[idx]) if has_rpm else np.nan
             rpm_val = None if np.isnan(rpm_val) else float(rpm_val)
 
@@ -342,6 +388,7 @@ class PumpDatabase:
             for d in diametros:
                 group_d = group[group["diametro_mm"].astype(float) == d]
                 puntos: List[Dict[str, float]] = []
+
                 for _, row in group_d.iterrows():
                     q = safe_float(row["Q_m3/h"])
                     h = safe_float(row["H_m"])
@@ -360,6 +407,7 @@ class PumpDatabase:
                 continue
 
             curvas = sorted(curvas, key=lambda c: c.diam)
+
             self.families.append(
                 {
                     "serie": serie if serie else marca,
@@ -456,13 +504,14 @@ def viscosity_correction(viscosidad_cst: float) -> float:
 
 
 # ==============================
-# Construcción de vistas
+# Session state
 # ==============================
 def init_session_state() -> None:
     defaults = {
         "authenticated": False,
         "username": "",
-        "screen": "Menú principal",
+        "page": "login",
+        "loaded_families": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -472,48 +521,35 @@ def init_session_state() -> None:
 init_session_state()
 
 
+# ==============================
+# Encabezado / navegación
+# ==============================
 def render_top_header() -> None:
     logo_path = find_logo_path()
-    v_path = find_v_path()
 
-    col_logo, col_title = st.columns([2.2, 4.2], vertical_alignment="center")
+    col_logo, col_title = st.columns([2.8, 3.2], vertical_alignment="center")
 
     with col_logo:
         if logo_path:
             logo_uri = image_to_data_uri(logo_path)
             st.markdown(
                 f"""
-                <div style="display:flex; align-items:center; height:140px;">
-                    <img src="{logo_uri}" style="max-height:120px; width:auto;">
+                <div style="display:flex; align-items:center; height:150px;">
+                    <img src="{logo_uri}" style="max-height:140px; width:auto;">
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
         else:
             st.markdown(
-                "<div style='font-size:3rem; font-weight:900; color:#0059aa;'>VOGT</div>",
+                "<div style='font-size:4rem; font-weight:900; color:#0059aa;'>VOGT</div>",
                 unsafe_allow_html=True,
             )
 
     with col_title:
-        v_html = ""
-        if v_path:
-            v_uri = image_to_data_uri(v_path)
-            v_html = f'<img src="{v_uri}" style="height:74px; width:auto;">'
-        else:
-            v_html = """
-            <div style="
-                width:74px; height:74px; border-radius:18px;
-                background:#0059aa; color:white; display:flex;
-                align-items:center; justify-content:center;
-                font-size:42px; font-weight:900;
-            ">V</div>
-            """
-
         st.markdown(
             f"""
-            <div style="display:flex; align-items:center; gap:1rem; min-height:140px;">
-                {v_html}
+            <div style="display:flex; align-items:center; min-height:150px;">
                 <div>
                     <div class="app-title">{APP_TITLE}</div>
                     <div class="app-subtitle">{APP_SUBTITLE}</div>
@@ -522,6 +558,18 @@ def render_top_header() -> None:
             """,
             unsafe_allow_html=True,
         )
+
+
+def go_to(page_name: str) -> None:
+    st.session_state.page = page_name
+    st.rerun()
+
+
+def logout() -> None:
+    st.session_state.authenticated = False
+    st.session_state.username = ""
+    st.session_state.page = "login"
+    st.rerun()
 
 
 # ==============================
@@ -543,14 +591,95 @@ def login_view() -> None:
             if username == VALID_USERNAME and password == VALID_PASSWORD:
                 st.session_state.authenticated = True
                 st.session_state.username = username
+                st.session_state.page = "menu"
                 st.rerun()
             else:
                 st.error("Usuario o contraseña incorrectos.")
 
 
 # ==============================
-# Carga y resumen de base
+# Menú principal
 # ==============================
+def main_menu_view() -> None:
+    render_top_header()
+
+    top_left, top_right = st.columns([6, 1])
+    with top_right:
+        st.button("Cerrar sesión", use_container_width=True, on_click=logout)
+
+    st.markdown("## Menu principal")
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.markdown(
+            """
+            <div class='menu-card'>
+                <h4>Selección de Bombas por punto hidraulico</h4>
+                <div class='small-note'>
+                    Evalúa el punto Q-H requerido, calcula el diámetro necesario y revisa las curvas características.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.button(
+            "Abrir selección por punto",
+            key="btn_hydraulic",
+            use_container_width=True,
+            on_click=go_to,
+            args=("hydraulic",),
+        )
+
+    with c2:
+        st.markdown(
+            """
+            <div class='menu-card'>
+                <h4>Seleccion de Bombas Manual</h4>
+                <div class='small-note'>
+                    Explora la lista completa de modelos, filtra por serie, polos o diámetro de descarga y revisa sus curvas.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.button(
+            "Abrir selección manual",
+            key="btn_manual",
+            use_container_width=True,
+            on_click=go_to,
+            args=("manual",),
+        )
+
+
+# ==============================
+# Carga de base
+# ==============================
+def load_database_widget() -> Optional[List[Dict]]:
+    uploaded_file = st.sidebar.file_uploader("Cargar Base Oficial (CSV)", type=["csv"])
+
+    if uploaded_file is not None:
+        db = PumpDatabase()
+        try:
+            db.load_from_csv(uploaded_file)
+            st.session_state.loaded_families = db.get_families()
+        except Exception as exc:
+            st.sidebar.error(f"Error de integridad en CSV: {exc}")
+            st.session_state.loaded_families = None
+
+    families = st.session_state.loaded_families
+
+    if families is not None:
+        st.sidebar.success(f"Base cargada: {len(families)} familias activas")
+        if st.sidebar.button("Quitar base cargada", use_container_width=True):
+            st.session_state.loaded_families = None
+            st.rerun()
+        return families
+
+    st.info("Carga la base CSV para habilitar la selección.")
+    return None
+
+
 def build_catalog_df(families: List[Dict]) -> pd.DataFrame:
     rows = []
     for fam in families:
@@ -559,13 +688,13 @@ def build_catalog_df(families: List[Dict]) -> pd.DataFrame:
                 "Serie (Marca)": fam["serie"],
                 "Marca": fam["marca"],
                 "Modelo": fam["modelo"],
-                "Polos": fam["polos"],
-                "RPM": fam["rpm"],
-                "Descarga DN": fam["descarga_dn"],
-                "D mín. (mm)": fam["D_min"],
-                "D máx. (mm)": fam["D_max"],
+                "Polos": float(fam["polos"]) if fam["polos"] is not None else np.nan,
+                "RPM": float(fam["rpm"]) if fam["rpm"] is not None else np.nan,
+                "Descarga DN": float(fam["descarga_dn"]) if fam["descarga_dn"] is not None else np.nan,
+                "D mín. (mm)": float(fam["D_min"]),
+                "D máx. (mm)": float(fam["D_max"]),
                 "Diámetros disponibles": ", ".join(
-                    str(int(d)) if float(d).is_integer() else f"{d:.1f}"
+                    str(int(d)) if float(d).is_integer() else f"{d:.2f}"
                     for d in fam["diametros_disponibles"]
                 ),
                 "_fam": fam,
@@ -574,25 +703,8 @@ def build_catalog_df(families: List[Dict]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def load_database_widget() -> Tuple[Optional[PumpDatabase], Optional[List[Dict]]]:
-    uploaded_file = st.sidebar.file_uploader("Cargar Base Oficial (CSV)", type=["csv"])
-    if uploaded_file is None:
-        st.info("Carga la base CSV para habilitar la selección.")
-        return None, None
-
-    db = PumpDatabase()
-    try:
-        db.load_from_csv(uploaded_file)
-        families = db.get_families()
-        st.sidebar.success(f"Base cargada: {len(families)} familias activas")
-        return db, families
-    except Exception as exc:
-        st.error(f"Error de integridad en CSV: {exc}")
-        return None, None
-
-
 # ==============================
-# Resultados por punto hidráulico
+# Evaluación por punto hidráulico
 # ==============================
 def evaluate_families(
     families: List[Dict],
@@ -610,7 +722,12 @@ def evaluate_families(
     results: List[Dict] = []
 
     for fam in families:
-        base_curve = fam["curvas"][-1]
+        valid_curves = [c for c in fam["curvas"] if c.get_h(q_req) >= h_req]
+        if valid_curves:
+            base_curve = valid_curves[0]
+        else:
+            base_curve = fam["curvas"][-1]
+
         d_req = find_trim_diameter(q_req, h_req, base_curve, fam["D_min"], fam["D_max"])
         if d_req is None:
             continue
@@ -644,16 +761,16 @@ def evaluate_families(
                 "Serie (Marca)": fam["serie"],
                 "Marca": fam["marca"],
                 "Modelo": fam["modelo"],
-                "Polos": fam["polos"],
-                "RPM": fam["rpm"],
-                "D_Impulsor (mm)": round(d_req, 1),
+                "Polos": float(fam["polos"]) if fam["polos"] is not None else np.nan,
+                "RPM": float(fam["rpm"]) if fam["rpm"] is not None else np.nan,
+                "D_Impulsor (mm)": round(d_req, 2),
                 "Q Op. (m3/h)": round(op_q, 2),
                 "H Op. (m)": round(h_op, 2),
                 "Eficiencia (%)": round(eta_op, 2),
                 "Potencia (kW)": round(p_kw, 2),
                 "NPSHr (m)": round(npshr, 2),
                 "Status NPSH": npsh_status,
-                "Motor IEC (kW)": motor_kw,
+                "Motor IEC (kW)": round(motor_kw, 2),
                 "_trim": trim_curve,
                 "_fam": fam,
                 "_sys_curve": sys_curve,
@@ -666,12 +783,6 @@ def evaluate_families(
 
     results.sort(key=lambda x: (-x["Status NPSH"], -x["Eficiencia (%)"], x["Potencia (kW)"]))
     return results
-
-
-def npsh_style(val):
-    if isinstance(val, bool) and not val:
-        return "background-color: #fde2e1"
-    return ""
 
 
 # ==============================
@@ -731,7 +842,7 @@ def plot_family_metric(
                     x=qq,
                     y=curve_values(curve, metric, qq, density=density, visco_cf=visco_cf),
                     mode="lines",
-                    name=f"D={curve.diam:.0f} mm",
+                    name=f"D={curve.diam:.2f} mm",
                     line=dict(width=1.5, color="rgba(130,130,130,0.75)"),
                     hovertemplate="Q: %{x:.2f} m³/h<br>Valor: %{y:.2f}<extra></extra>",
                 )
@@ -750,9 +861,9 @@ def plot_family_metric(
                 y=curve_values(selected_trim, metric, qq_sel, density=density, visco_cf=visco_cf),
                 mode="lines",
                 name=(
-                    f"Diámetro escogido = {selected_trim.diam:.1f} mm"
+                    f"Diámetro escogido = {selected_trim.diam:.2f} mm"
                     if selected_real_diam is None
-                    else f"D = {selected_real_diam:.1f} mm"
+                    else f"D = {selected_real_diam:.2f} mm"
                 ),
                 line=dict(width=3, color="#0059aa"),
                 hovertemplate="Q: %{x:.2f} m³/h<br>Valor: %{y:.2f}<extra></extra>",
@@ -769,14 +880,21 @@ def plot_family_metric(
                 x=qq,
                 y=curve_values(curve, metric, qq, density=density, visco_cf=visco_cf),
                 mode="lines",
-                name=f"D={curve.diam:.0f} mm",
+                name=f"D={curve.diam:.2f} mm",
                 line=dict(width=3, color="#0059aa"),
+                hovertemplate="Q: %{x:.2f} m³/h<br>Valor: %{y:.2f}<extra></extra>",
             )
         )
 
     if metric == "H" and sys_curve is not None:
-        q_lim = max([c.q_max for c in fam["curvas"]] + [q_req or 0.0])
-        qq_sys = np.linspace(0.0, max(1.2 * q_lim, 1.0), 160)
+        if op_q is not None:
+            q_end_sys = op_q
+        elif q_req is not None:
+            q_end_sys = q_req
+        else:
+            q_end_sys = max([c.q_max for c in fam["curvas"]])
+
+        qq_sys = np.linspace(0.0, max(q_end_sys, 0.5), 160)
         fig.add_trace(
             go.Scatter(
                 x=qq_sys,
@@ -784,6 +902,7 @@ def plot_family_metric(
                 mode="lines",
                 name="Curva del sistema",
                 line=dict(width=2, color="#f59e0b", dash="dash"),
+                hovertemplate="Q: %{x:.2f} m³/h<br>H: %{y:.2f} m<extra></extra>",
             )
         )
 
@@ -795,6 +914,7 @@ def plot_family_metric(
                 mode="markers",
                 name="Punto requerido",
                 marker=dict(size=10, color="#ef4444", symbol="x"),
+                hovertemplate="Q: %{x:.2f} m³/h<br>H: %{y:.2f} m<extra></extra>",
             )
         )
 
@@ -815,6 +935,7 @@ def plot_family_metric(
                 mode="markers",
                 name="Punto operativo",
                 marker=dict(size=11, color="#dc2626"),
+                hovertemplate="Q: %{x:.2f}<br>Valor: %{y:.2f}<extra></extra>",
             )
         )
 
@@ -830,12 +951,14 @@ def plot_family_metric(
         showgrid=True,
         gridcolor="rgba(200,200,200,0.35)",
         zeroline=False,
+        tickformat=".2f",
     )
     fig.update_yaxes(
         title_text=metric_label(metric),
         showgrid=True,
         gridcolor="rgba(200,200,200,0.35)",
         zeroline=False,
+        tickformat=".2f",
     )
     return fig
 
@@ -943,22 +1066,22 @@ def family_curve_summary_table(fam: Dict) -> pd.DataFrame:
 
 
 # ==============================
-# Pantallas principales
+# Vista selección por punto
 # ==============================
 def hydraulic_selection_view(families: List[Dict]) -> None:
     st.sidebar.header("1. Parámetros del Fluido")
     fluid_name = st.sidebar.text_input("Fluido", "Agua limpia")
-    densidad = st.sidebar.number_input("Densidad (kg/m³)", value=1000.0, step=10.0)
-    viscosidad = st.sidebar.number_input("Viscosidad cinemática (cSt)", value=1.0, step=0.5)
+    densidad = st.sidebar.number_input("Densidad (kg/m³)", value=1000.0, step=10.0, format="%.2f")
+    viscosidad = st.sidebar.number_input("Viscosidad cinemática (cSt)", value=1.0, step=0.5, format="%.2f")
 
     st.sidebar.header("2. Punto de Operación")
-    q_req = st.sidebar.number_input("Caudal solicitado Q (m³/h)", value=50.0, step=1.0)
-    h_req = st.sidebar.number_input("Altura solicitada H (m)", value=30.0, step=1.0)
-    npsha = st.sidebar.number_input("NPSH disponible (m)", value=10.0, step=0.5)
+    q_req = st.sidebar.number_input("Caudal solicitado Q (m³/h)", value=50.0, step=1.0, format="%.2f")
+    h_req = st.sidebar.number_input("Altura solicitada H (m)", value=30.0, step=1.0, format="%.2f")
+    npsha = st.sidebar.number_input("NPSH disponible (m)", value=10.0, step=0.5, format="%.2f")
 
     st.sidebar.header("3. Curva del Sistema")
     usar_sistema = st.sidebar.checkbox("Considerar curva del sistema", value=True)
-    h_est = st.sidebar.number_input("Carga estática (m)", value=0.0, disabled=not usar_sistema)
+    h_est = st.sidebar.number_input("Carga estática (m)", value=0.0, disabled=not usar_sistema, format="%.2f")
     k_calc = (h_req - h_est) / (q_req ** 2) if q_req > 0 else 0.0
     k_sys = st.sidebar.number_input(
         "Coef. fricción sistema (k)",
@@ -975,7 +1098,7 @@ def hydraulic_selection_view(families: List[Dict]) -> None:
     ) == "Todos los diámetros de la bomba seleccionada"
 
     st.markdown("### Selección de Bombas por punto hidraulico")
-    st.caption(f"Fluido: {fluid_name} · Densidad: {densidad:.1f} kg/m³ · Viscosidad: {viscosidad:.1f} cSt")
+    st.caption(f"Fluido: {fluid_name} · Densidad: {fmt2(densidad)} kg/m³ · Viscosidad: {fmt2(viscosidad)} cSt")
 
     results = evaluate_families(
         families=families,
@@ -1015,7 +1138,7 @@ def hydraulic_selection_view(families: List[Dict]) -> None:
     df_res = df_res[ordered_cols]
 
     st.dataframe(
-        df_res.style.map(npsh_style, subset=["Status NPSH"]),
+        style_results_df(df_res),
         use_container_width=True,
         hide_index=True,
     )
@@ -1023,7 +1146,7 @@ def hydraulic_selection_view(families: List[Dict]) -> None:
     st.markdown("---")
 
     labels = [
-        f"{r['Serie (Marca)']} | {r['Modelo']} | {r['Polos']} polos | η={r['Eficiencia (%)']:.2f}% | D={r['D_Impulsor (mm)']:.1f} mm"
+        f"{r['Serie (Marca)']} | {r['Modelo']} | {fmt0(r['Polos'])} polos | η={fmt2(r['Eficiencia (%)'])}% | D={fmt2(r['D_Impulsor (mm)'])} mm"
         for r in results
     ]
     selected_idx = st.selectbox(
@@ -1039,13 +1162,16 @@ def hydraulic_selection_view(families: List[Dict]) -> None:
     detail_cols = st.columns(5)
     detail_cols[0].metric("Serie", selected["Serie (Marca)"])
     detail_cols[1].metric("Modelo", selected["Modelo"])
-    detail_cols[2].metric("Diámetro escogido", f"{selected['D_Impulsor (mm)']:.1f} mm")
-    detail_cols[3].metric("Punto operativo", f"Q={selected['Q Op. (m3/h)']:.2f} | H={selected['H Op. (m)']:.2f}")
+    detail_cols[2].metric("Diámetro escogido", f"{fmt2(selected['D_Impulsor (mm)'])} mm")
+    detail_cols[3].metric(
+        "Punto operativo",
+        f"Q={fmt2(selected['Q Op. (m3/h)'])} | H={fmt2(selected['H Op. (m)'])}"
+    )
     detail_cols[4].metric("NPSH", "OK" if selected["Status NPSH"] else "Revisar")
 
     render_characteristic_curves(
         fam=fam,
-        title_prefix=f"{selected['Modelo']} · {selected['Polos']} polos",
+        title_prefix=f"{selected['Modelo']} · {fmt0(selected['Polos'])} polos",
         show_all_diameters=show_all_diameters,
         selected_trim=trim_curve,
         selected_real_diam=selected["D_Impulsor (mm)"],
@@ -1059,125 +1185,215 @@ def hydraulic_selection_view(families: List[Dict]) -> None:
 
     st.markdown("#### Datos de la bomba seleccionada")
     st.dataframe(
-        family_curve_summary_table(fam),
+        style_numeric_df(family_curve_summary_table(fam)),
         use_container_width=True,
         hide_index=True,
     )
+
+
+# ==============================
+# Selección manual - formato ajustado
+# ==============================
+def reset_manual_filters():
+    keys_to_delete = [k for k in st.session_state.keys() if k.startswith("manualflt_")]
+    for key in keys_to_delete:
+        del st.session_state[key]
+
+
+def render_checkbox_filter_group(
+    title: str,
+    options: List,
+    prefix: str,
+    limit: int = 5,
+    formatter=lambda x: str(x),
+):
+    show_key = f"manualflt_showall_{prefix}"
+    if show_key not in st.session_state:
+        st.session_state[show_key] = False
+
+    selected = []
+    visible_options = options if st.session_state[show_key] else options[:limit]
+
+    for opt in visible_options:
+        ckey = keyify(f"manualflt_{prefix}", opt)
+        checked = st.checkbox(formatter(opt), key=ckey)
+        if checked:
+            selected.append(opt)
+
+    if len(options) > limit:
+        label = "Show all" if not st.session_state[show_key] else "Show less"
+        if st.button(label, key=f"toggle_{prefix}"):
+            st.session_state[show_key] = not st.session_state[show_key]
+            st.rerun()
+
+    return selected
 
 
 def manual_selection_view(families: List[Dict]) -> None:
     st.markdown("### Seleccion de Bombas Manual")
     catalog_df = build_catalog_df(families)
+
     if catalog_df.empty:
         st.warning("La base cargada no contiene familias utilizables.")
         return
 
-    st.sidebar.header("Filtros selección manual")
-    available_series = sorted([x for x in catalog_df["Serie (Marca)"].dropna().unique().tolist()])
-    available_poles = sorted([int(x) for x in catalog_df["Polos"].dropna().unique().tolist()])
-    available_dn = sorted([int(x) for x in catalog_df["Descarga DN"].dropna().unique().tolist()])
+    catalog_df = catalog_df.sort_values(
+        by=["Descarga DN", "Modelo", "Polos"],
+        ascending=[True, True, True],
+        na_position="last"
+    ).reset_index(drop=True)
 
-    filter_series = st.sidebar.multiselect("Serie (Marca)", available_series)
-    filter_poles = st.sidebar.multiselect("Número de polos", available_poles)
-    filter_dn = st.sidebar.multiselect("Diámetro de descarga", available_dn)
-    model_search = st.sidebar.text_input("Buscar modelo")
-    show_all_diameters = st.sidebar.radio(
-        "Diámetros a mostrar",
-        ["Todos los diámetros disponibles", "Solo un diámetro"],
-        index=0,
-    ) == "Todos los diámetros disponibles"
+    left, right = st.columns([1.05, 4.0], gap="large")
+
+    with left:
+        st.markdown("<div class='manual-panel'>", unsafe_allow_html=True)
+        header_cols = st.columns([2, 1])
+        with header_cols[0]:
+            st.markdown("<div class='filter-list-title'>Filter list</div>", unsafe_allow_html=True)
+        with header_cols[1]:
+            if st.button("Reset", key="manual_reset"):
+                reset_manual_filters()
+                st.rerun()
+
+        st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
+
+        series_options = sorted([x for x in catalog_df["Serie (Marca)"].dropna().unique().tolist()])
+        model_options = sorted([x for x in catalog_df["Modelo"].dropna().unique().tolist()])
+        poles_options = sorted([int(x) for x in catalog_df["Polos"].dropna().unique().tolist()])
+        dn_options = sorted([int(x) for x in catalog_df["Descarga DN"].dropna().unique().tolist()])
+
+        with st.expander("Serie (Marca)", expanded=True):
+            selected_series = render_checkbox_filter_group(
+                "Serie (Marca)", series_options, "series", limit=5
+            )
+
+        with st.expander("Modelo", expanded=True):
+            selected_models = render_checkbox_filter_group(
+                "Modelo", model_options, "models", limit=5
+            )
+
+        with st.expander("Polos", expanded=True):
+            selected_poles = render_checkbox_filter_group(
+                "Polos", poles_options, "poles", limit=6, formatter=lambda x: f"{x}"
+            )
+
+        with st.expander("Diámetro de descarga", expanded=True):
+            selected_dn = render_checkbox_filter_group(
+                "Diámetro de descarga", dn_options, "dn", limit=6, formatter=lambda x: f"{x}"
+            )
+
+        model_search = st.text_input("Buscar modelo", key="manualflt_search_model")
+        st.markdown("</div>", unsafe_allow_html=True)
 
     filtered = catalog_df.copy()
-    if filter_series:
-        filtered = filtered[filtered["Serie (Marca)"].isin(filter_series)]
-    if filter_poles:
-        filtered = filtered[filtered["Polos"].isin(filter_poles)]
-    if filter_dn:
-        filtered = filtered[filtered["Descarga DN"].isin(filter_dn)]
+
+    if selected_series:
+        filtered = filtered[filtered["Serie (Marca)"].isin(selected_series)]
+    if selected_models:
+        filtered = filtered[filtered["Modelo"].isin(selected_models)]
+    if selected_poles:
+        filtered = filtered[filtered["Polos"].isin([float(x) for x in selected_poles])]
+    if selected_dn:
+        filtered = filtered[filtered["Descarga DN"].isin([float(x) for x in selected_dn])]
     if model_search:
         filtered = filtered[filtered["Modelo"].astype(str).str.contains(model_search, case=False, na=False)]
 
-    if filtered.empty:
-        st.warning("No hay modelos que coincidan con los filtros aplicados.")
-        return
+    filtered = filtered.reset_index(drop=True)
 
-    st.subheader("Lista completa de modelos")
-    st.dataframe(filtered.drop(columns=["_fam"]), use_container_width=True, hide_index=True)
+    with right:
+        st.markdown(f"<div class='results-count'>{len(filtered)} Results</div>", unsafe_allow_html=True)
 
-    selection_labels = [
-        f"{row['Serie (Marca)']} | {row['Modelo']} | {int(row['Polos']) if pd.notna(row['Polos']) else '-'} polos | DN {int(row['Descarga DN']) if pd.notna(row['Descarga DN']) else '-'}"
-        for _, row in filtered.iterrows()
-    ]
+        if filtered.empty:
+            st.warning("No hay modelos que coincidan con los filtros aplicados.")
+            return
 
-    selection_index = st.selectbox(
-        "Selecciona una bomba",
-        range(len(filtered)),
-        format_func=lambda i: selection_labels[i],
-    )
-
-    selected_row = filtered.iloc[selection_index]
-    fam = selected_row["_fam"]
-
-    selected_real_diam = None
-    if not show_all_diameters:
-        selected_real_diam = st.selectbox(
-            "Diámetro a mostrar",
-            fam["diametros_disponibles"],
-            format_func=lambda x: f"{x:.1f} mm",
+        manual_table = pd.DataFrame(
+            {
+                "Curva": ["Ver"] * len(filtered),
+                "Serie (Marca)": filtered["Serie (Marca)"],
+                "Modelo": filtered["Modelo"],
+                "Polos": filtered["Polos"],
+                "Impulsor actual [mm]": filtered["D máx. (mm)"],
+                "Descarga DN": filtered["Descarga DN"],
+                "RPM": filtered["RPM"],
+            }
         )
 
-    kpi_cols = st.columns(5)
-    kpi_cols[0].metric("Serie", str(selected_row["Serie (Marca)"]))
-    kpi_cols[1].metric("Modelo", str(selected_row["Modelo"]))
-    kpi_cols[2].metric("Polos", str(int(selected_row["Polos"])) if pd.notna(selected_row["Polos"]) else "-")
-    kpi_cols[3].metric("D mín. / D máx.", f"{selected_row['D mín. (mm)']:.1f} / {selected_row['D máx. (mm)']:.1f} mm")
-    kpi_cols[4].metric("Cantidad diámetros", str(len(fam["diametros_disponibles"])))
+        st.dataframe(
+            style_numeric_df(manual_table, zero_dec_cols=["Polos", "Descarga DN", "RPM"]),
+            use_container_width=True,
+            hide_index=True,
+        )
 
-    render_characteristic_curves(
-        fam=fam,
-        title_prefix=f"{selected_row['Modelo']} · {int(selected_row['Polos']) if pd.notna(selected_row['Polos']) else '-'} polos",
-        show_all_diameters=show_all_diameters,
-        selected_real_diam=selected_real_diam,
-        density=1000.0,
-        visco_cf=1.0,
-    )
+        st.markdown("---")
 
-    st.markdown("#### Diámetros presentes en la base de datos")
-    st.dataframe(
-        family_curve_summary_table(fam),
-        use_container_width=True,
-        hide_index=True,
-    )
+        show_all_diameters = st.radio(
+            "Diámetros a mostrar",
+            ["Todos los diámetros disponibles", "Solo un diámetro"],
+            index=0,
+            horizontal=True,
+        ) == "Todos los diámetros disponibles"
+
+        selection_labels = [
+            f"{row['Serie (Marca)']} | {row['Modelo']} | {fmt0(row['Polos'])} polos | D máx = {fmt2(row['D máx. (mm)'])} mm"
+            for _, row in filtered.iterrows()
+        ]
+
+        selection_index = st.selectbox(
+            "Selecciona una bomba",
+            range(len(filtered)),
+            format_func=lambda i: selection_labels[i],
+        )
+
+        selected_row = filtered.iloc[selection_index]
+        fam = selected_row["_fam"]
+
+        selected_real_diam = None
+        if not show_all_diameters:
+            selected_real_diam = st.selectbox(
+                "Diámetro a mostrar",
+                fam["diametros_disponibles"],
+                format_func=lambda x: f"{x:.2f} mm",
+            )
+
+        kpi_cols = st.columns(6)
+        kpi_cols[0].metric("Serie", str(selected_row["Serie (Marca)"]))
+        kpi_cols[1].metric("Modelo", str(selected_row["Modelo"]))
+        kpi_cols[2].metric("Polos", fmt0(selected_row["Polos"]))
+        kpi_cols[3].metric("RPM", fmt0(selected_row["RPM"]))
+        kpi_cols[4].metric("D mín. (mm)", fmt2(selected_row["D mín. (mm)"]))
+        kpi_cols[5].metric("D máx. (mm)", fmt2(selected_row["D máx. (mm)"]))
+
+        render_characteristic_curves(
+            fam=fam,
+            title_prefix=f"{selected_row['Modelo']} · {fmt0(selected_row['Polos'])} polos",
+            show_all_diameters=show_all_diameters,
+            selected_real_diam=selected_real_diam,
+            density=1000.0,
+            visco_cf=1.0,
+        )
+
+        st.markdown("#### Diámetros presentes en la base de datos")
+        st.dataframe(
+            style_numeric_df(family_curve_summary_table(fam)),
+            use_container_width=True,
+            hide_index=True,
+        )
 
 
-def main_menu_view(families: List[Dict]) -> None:
-    st.markdown("## Menu principal")
-    st.markdown(
-        """
-        <div class='menu-card'>
-            <h4>1. Selección de Bombas por punto hidraulico</h4>
-            <div class='small-note'>Evalúa el punto Q-H requerido, calcula diámetro necesario y revisa curvas características.</div>
-        </div>
-        <br>
-        <div class='menu-card'>
-            <h4>2. Seleccion de Bombas Manual</h4>
-            <div class='small-note'>Explora la lista completa de modelos, filtra por serie, polos o diámetro de descarga y revisa sus curvas.</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+# ==============================
+# Shell de páginas de trabajo
+# ==============================
+def render_work_page_header() -> None:
+    render_top_header()
 
-    view = st.radio(
-        "Ir a",
-        ["Selección de Bombas por punto hidraulico", "Seleccion de Bombas Manual"],
-        horizontal=True,
-    )
-
-    st.markdown("---")
-    if view == "Selección de Bombas por punto hidraulico":
-        hydraulic_selection_view(families)
-    else:
-        manual_selection_view(families)
+    with st.sidebar:
+        st.success(f"Usuario conectado: {st.session_state.username}")
+        if st.button("Volver al menú principal", use_container_width=True):
+            go_to("menu")
+        if st.button("Cerrar sesión", use_container_width=True):
+            logout()
+        st.markdown("---")
 
 
 # ==============================
@@ -1188,21 +1404,22 @@ def app() -> None:
         login_view()
         return
 
-    render_top_header()
-
-    with st.sidebar:
-        st.success(f"Usuario conectado: {st.session_state.username}")
-        if st.button("Cerrar sesión", use_container_width=True):
-            st.session_state.authenticated = False
-            st.session_state.username = ""
-            st.rerun()
-        st.markdown("---")
-
-    db, families = load_database_widget()
-    if not db or not families:
+    if st.session_state.page == "menu":
+        main_menu_view()
         return
 
-    main_menu_view(families)
+    render_work_page_header()
+
+    families = load_database_widget()
+    if families is None:
+        return
+
+    if st.session_state.page == "hydraulic":
+        hydraulic_selection_view(families)
+    elif st.session_state.page == "manual":
+        manual_selection_view(families)
+    else:
+        go_to("menu")
 
 
 if __name__ == "__main__":
