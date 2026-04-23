@@ -13,3 +13,5 @@ Seleccionador Bombas Normalizadas
 Series N-NP-N(V) justo a la derecha del logo (matener logo en su posicion actual)
 En selección de bomba manual quiero que la tabla que aparece con todas las bombas(adjunto foto de la tabla) sea interactiva, es decir que cuando uno pueda seleccionar desde ahi el modelo que quiere visualizar
 en el aparto de seleccion de bombas manual, quiero que las curvas mostradas esten suavizadas y sean de color negro
+En las tablas donde esta el listado de bombas (ya sea seleccion manual o por punto) eliminar la columna marca y dejar lacolumna "Serie" Pero que muestre en vez de "grundfos" N, en vez de "sempa" NP" y en vez de WILO "N (V)
+En la ventana de selección por punto hidraulico tiene que dar igual la funcion de filtrar por serie (NP, N , N (V))
