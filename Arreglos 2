@@ -3,3 +3,8 @@ Que muestre solo dos digitos despues de la coma en las variables, menos rpm que 
 Cuando decida mostrarse la curva del sistema que esta termine junto en el punto de intersseccion
 Despues de ingresar la contraseña, nos abra una ventana que SOLO sea el menu principal y las dos opciones de seleccion manual o por punto y luego dependiendo de lo escogido nos abra ota ventana,no en la misma, y que muestre lo escogido tal como está ahora, no hagas ningun cambio en como se muestran las cosas a menos que yo lo indique
 La Seleccion manual quiero que sigas el formato (parecido, no igual) ajustandolo a nuestro contexto de la foto adjunta
+Agregar un cuadro a los graficos
+Diametro aproximado sin decimales (numeros enteros)
+Puntos de operación Q y Altura los que ingresa el usuario un numero despues de la coma, y cuando se muestre tambien
+en el encabezado  justo despues de seleccionar bombas para mostrar curvas, mostrar cantidad de polos
+luego en los graficos solo mencionar de que es el gráfico (eficiencia,npsh,potencia, altura)no mostrar toda la informacion que se muestra actualmente en los graficos (diametro-modelos-polos) basta con el encabezado que te mencioné anteriormente
