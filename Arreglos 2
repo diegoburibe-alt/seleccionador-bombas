@@ -15,3 +15,10 @@ En selección de bomba manual quiero que la tabla que aparece con todas las bomb
 en el aparto de seleccion de bombas manual, quiero que las curvas mostradas esten suavizadas y sean de color negro
 En las tablas donde esta el listado de bombas (ya sea seleccion manual o por punto) eliminar la columna marca y dejar lacolumna "Serie" Pero que muestre en vez de "grundfos" N, en vez de "sempa" NP" y en vez de WILO "N (V)
 En la ventana de selección por punto hidraulico tiene que dar igual la funcion de filtrar por serie (NP, N , N (V))
+
+
+Que el filtro de serie en la seleccion por punto no este en el panel izquierdo sino justo antes e la tabla.
+En la selección de bombas por punto debajo de cada gráfico de H,POTENCIA, RENDIMIENTO Y NPSH salga el valor de esta variable en el punto
+en la seleccion manual de bombas, en la tabla con todas las bombas Que no salga la columna seleccionar, sino que uno al apretar cualquier parte de la fila de la bomba se seleccione automaticamente
+Que en la selección manual de bombas un pueda escoger un diametro cualquiera que no esté en la base de datos y muestre los gráficos de igual manera.
+Que en la seleccion manual de bombas uno pueda seleccionar un punto SOLO DE LOS DIAMETROS MOSTRADOS,pasando el mouse por arriba y apretando, y que el punto se muestre en todos los otros graficos
