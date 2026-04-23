@@ -8,3 +8,6 @@ Diametro aproximado sin decimales (numeros enteros)
 Puntos de operación Q y Altura los que ingresa el usuario un numero despues de la coma, y cuando se muestre tambien
 en el encabezado  justo despues de seleccionar bombas para mostrar curvas, mostrar cantidad de polos
 luego en los graficos solo mencionar de que es el gráfico (eficiencia,npsh,potencia, altura)no mostrar toda la informacion que se muestra actualmente en los graficos (diametro-modelos-polos) basta con el encabezado que te mencioné anteriormente
+Agrandar logo vogt y poner el titulos: 
+Seleccionador Bombas Normalizadas
+Series N-NP-N(V) justo a la derecha del logo (matener logo en su posicion actual)
