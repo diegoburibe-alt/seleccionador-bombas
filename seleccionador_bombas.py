@@ -16,7 +16,7 @@ from scipy.optimize import brentq, curve_fit
 # ==============================
 NPSH_MARGIN_M = 0.5
 VALID_USERNAME = "Diego"
-VALID_PASSWORD = "Vogt1234"
+VALID_PASSWORD = "Vog1234"
 APP_SUBTITLE = "Series N-NP-N(V)"
 APP_TITLE = "Seleccionador Bombas Normalizadas"
 
@@ -236,23 +236,6 @@ def display_serie_value(marca: str, serie: Optional[str] = None) -> str:
     return str(marca)
 
 
-def extract_selected_rows(event) -> List[int]:
-    if event is None:
-        return []
-    sel = getattr(event, "selection", None)
-    if sel is None:
-        return []
-    if isinstance(sel, dict):
-        return sel.get("rows", [])
-    rows_attr = getattr(sel, "rows", None)
-    if rows_attr is not None:
-        return rows_attr
-    try:
-        return sel["rows"]
-    except Exception:
-        return []
-
-
 # ==============================
 # Modelo hidráulico
 # ==============================
@@ -303,13 +286,6 @@ class PumpCurveBase:
         h_raw = np.array([p["H"] for p in self.puntos], dtype=float)
         eta_raw = np.array([p["eta"] for p in self.puntos], dtype=float)
         npsh_raw = np.array([p["NPSH"] for p in self.puntos], dtype=float)
-        p_raw = np.array([p.get("P", np.nan) for p in self.puntos], dtype=float)
-
-        self.raw_q = q_raw
-        self.raw_h = h_raw
-        self.raw_eta = eta_raw
-        self.raw_npsh = npsh_raw
-        self.raw_p = p_raw
 
         self.popt_h, _ = curve_fit(poly2, q_raw, h_raw)
         self.a, self.b, self.c = self.popt_h
@@ -323,18 +299,12 @@ class PumpCurveBase:
         self.unique_q = unique_q
         self.eta_values = eta_raw[unique_idx]
         self.npsh_values = npsh_raw[unique_idx]
+
         self.interp_eta = PchipInterpolator(self.unique_q, self.eta_values)
         self.interp_npsh = PchipInterpolator(self.unique_q, self.npsh_values)
 
         self.q_min = float(np.min(self.unique_q))
         self.q_max = float(np.max(self.unique_q))
-
-        valid_p_mask = ~np.isnan(p_raw)
-        self.has_power_poly = bool(np.sum(valid_p_mask) >= 3)
-        if self.has_power_poly:
-            self.popt_p, _ = curve_fit(poly2, q_raw[valid_p_mask], p_raw[valid_p_mask])
-        else:
-            self.popt_p = None
 
         qq = np.linspace(max(0.1, self.q_min), self.q_max, 240)
         ee = self.interp_eta(qq)
@@ -354,8 +324,6 @@ class PumpCurveBase:
         return float(self.interp_npsh(q_eval))
 
     def get_power(self, q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
-        if self.has_power_poly and self.popt_p is not None:
-            return max(0.0, float(poly2(np.array([q]), *self.popt_p)[0]))
         h = self.get_h(q)
         eta = max(0.01, self.get_eta(q) * viscosity_cf)
         power_w = (q / 3600.0) * h * density * 9.81 / (eta / 100.0)
@@ -367,8 +335,6 @@ class TrimmedCurve:
         self.base = base_curve
         self.diam = float(trim_diam)
         self.ratio = self.diam / self.base.diam
-        self.q_min = max(0.05, self.base.q_min * self.ratio)
-        self.q_max = self.base.q_max * self.ratio
 
     def get_h(self, q: float) -> float:
         q_base = q / self.ratio
@@ -385,11 +351,52 @@ class TrimmedCurve:
         return self.base.get_npshr(q_base) * (self.ratio ** 2)
 
     def get_power(self, q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
-        q_base = q / self.ratio
-        return max(0.0, (self.ratio ** 3) * self.base.get_power(q_base, density=density, viscosity_cf=viscosity_cf))
+        h = self.get_h(q)
+        eta = max(0.01, self.get_eta(q) * viscosity_cf)
+        power_w = (q / 3600.0) * h * density * 9.81 / (eta / 100.0)
+        return float(power_w / 1000.0)
 
     def get_max_power(self, end_q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
         qq = np.linspace(max(0.1, 0.02 * end_q), max(end_q, 0.1), 120)
+        powers = [self.get_power(qi, density=density, viscosity_cf=viscosity_cf) for qi in qq]
+        return float(max(powers)) if powers else 0.0
+
+
+
+
+class InterpolatedDiameterCurve:
+    def __init__(self, curve_low: PumpCurveBase, curve_high: PumpCurveBase, interp_diam: float) -> None:
+        if curve_high.diam <= curve_low.diam:
+            raise ValueError("Los diámetros vecinos deben estar ordenados de menor a mayor.")
+        self.curve_low = curve_low
+        self.curve_high = curve_high
+        self.diam = float(interp_diam)
+        self.d1 = float(curve_low.diam)
+        self.d2 = float(curve_high.diam)
+        self.lam = (self.diam - self.d1) / (self.d2 - self.d1)
+        self.q_min = max(curve_low.q_min, curve_high.q_min)
+        self.q_max = min(curve_low.q_max, curve_high.q_max)
+
+    def _blend(self, y1: float, y2: float) -> float:
+        return float((1.0 - self.lam) * y1 + self.lam * y2)
+
+    def get_h(self, q: float) -> float:
+        return self._blend(self.curve_low.get_h(q), self.curve_high.get_h(q))
+
+    def get_eta(self, q: float) -> float:
+        return self._blend(self.curve_low.get_eta(q), self.curve_high.get_eta(q))
+
+    def get_npshr(self, q: float) -> float:
+        return self._blend(self.curve_low.get_npshr(q), self.curve_high.get_npshr(q))
+
+    def get_power(self, q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
+        return self._blend(
+            self.curve_low.get_power(q, density=density, viscosity_cf=viscosity_cf),
+            self.curve_high.get_power(q, density=density, viscosity_cf=viscosity_cf),
+        )
+
+    def get_max_power(self, end_q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
+        qq = np.linspace(max(0.1, self.q_min), max(end_q, 0.1), 120)
         powers = [self.get_power(qi, density=density, viscosity_cf=viscosity_cf) for qi in qq]
         return float(max(powers)) if powers else 0.0
 
@@ -418,7 +425,6 @@ class PumpDatabase:
 
         series_col = "Serie" if "Serie" in df.columns else None
         has_rpm = "RPM" in df.columns
-        has_pot_kw = "pot_kw" in df.columns
 
         groupby_cols = []
         if series_col:
@@ -450,7 +456,7 @@ class PumpDatabase:
 
             curvas: List[PumpCurveBase] = []
             for d in diametros:
-                group_d = group[group["diametro_mm"].astype(float) == d].sort_values("Q_m3/h")
+                group_d = group[group["diametro_mm"].astype(float) == d]
                 puntos: List[Dict[str, float]] = []
 
                 for _, row in group_d.iterrows():
@@ -458,9 +464,8 @@ class PumpDatabase:
                     h = safe_float(row["H_m"])
                     eta = safe_float(row.get("h_%", row.get("eta", 0.0)), 0.0)
                     npsh = safe_float(row.get("NPSH_m", row.get("NPSH", 0.0)), 0.0)
-                    p = safe_float(row.get("pot_kw", np.nan), np.nan) if has_pot_kw else np.nan
                     if not np.isnan(q) and not np.isnan(h):
-                        puntos.append({"Q": q, "H": h, "eta": eta, "NPSH": npsh, "P": p})
+                        puntos.append({"Q": q, "H": h, "eta": eta, "NPSH": npsh})
 
                 if len(puntos) >= 3:
                     try:
@@ -534,6 +539,40 @@ def find_trim_diameter(
         return None
     except Exception:
         return None
+
+def find_interpolated_diameter_curve(
+    fam: Dict,
+    q_req: float,
+    h_req: float,
+) -> Tuple[Optional[float], Optional[object], Optional[PumpCurveBase], Optional[PumpCurveBase]]:
+    curvas = sorted(fam["curvas"], key=lambda c: c.diam)
+
+    for curve in curvas:
+        if abs(curve.get_h(q_req) - h_req) < 1e-8:
+            return float(curve.diam), curve, curve, curve
+
+    for curve_low, curve_high in zip(curvas[:-1], curvas[1:]):
+        h_low = float(curve_low.get_h(q_req))
+        h_high = float(curve_high.get_h(q_req))
+        h_min = min(h_low, h_high)
+        h_max = max(h_low, h_high)
+
+        if h_min <= h_req <= h_max:
+            if abs(h_high - h_low) < 1e-12:
+                continue
+            lam = (h_req - h_low) / (h_high - h_low)
+            d_req = float(curve_low.diam + lam * (curve_high.diam - curve_low.diam))
+
+            if abs(d_req - curve_low.diam) < 1e-8:
+                return float(curve_low.diam), curve_low, curve_low, curve_low
+            if abs(d_req - curve_high.diam) < 1e-8:
+                return float(curve_high.diam), curve_high, curve_high, curve_high
+
+            interp_curve = InterpolatedDiameterCurve(curve_low, curve_high, d_req)
+            return d_req, interp_curve, curve_low, curve_high
+
+    return None, None, None, None
+
 
 
 def find_operating_point(
@@ -806,22 +845,6 @@ def curve_values(
     return values
 
 
-def raw_curve_values(curve_obj: PumpCurveBase, metric: str, visco_cf: float = 1.0) -> Tuple[np.ndarray, np.ndarray]:
-    x = curve_obj.raw_q
-    if metric == "H":
-        y = curve_obj.raw_h
-    elif metric == "ETA":
-        y = curve_obj.raw_eta * visco_cf
-    elif metric == "P":
-        if np.sum(~np.isnan(curve_obj.raw_p)) >= 1:
-            mask = ~np.isnan(curve_obj.raw_p)
-            return x[mask], curve_obj.raw_p[mask]
-        y = np.array([curve_obj.get_power(float(q)) for q in x], dtype=float)
-    else:
-        y = curve_obj.raw_npsh
-    return x, y
-
-
 def apply_graph_box(fig: go.Figure) -> None:
     fig.update_layout(
         plot_bgcolor="white",
@@ -870,7 +893,6 @@ def plot_family_metric(
     smooth_curves: bool = False,
     highlight_curve_obj=None,
     highlight_q: Optional[float] = None,
-    manual_use_raw: bool = False,
 ) -> go.Figure:
     fig = go.Figure()
 
@@ -882,40 +904,30 @@ def plot_family_metric(
 
     if show_all_diameters:
         for curve in fam["curvas"]:
-            if manual_use_raw:
-                qq, yy = raw_curve_values(curve, metric, visco_cf=visco_cf)
-            else:
-                qq = np.linspace(curve.q_min, curve.q_max, n_points)
-                yy = curve_values(curve, metric, qq, density=density, visco_cf=visco_cf)
+            qq = np.linspace(curve.q_min, curve.q_max, n_points)
             fig.add_trace(
                 go.Scatter(
                     x=qq,
-                    y=yy,
-                    mode="lines+markers",
+                    y=curve_values(curve, metric, qq, density=density, visco_cf=visco_cf),
+                    mode="lines",
                     name=f"D={curve.diam:.0f} mm",
                     line=dict(width=1.5, color=base_color, shape=line_shape),
-                    marker=dict(size=4, color="rgba(0,0,0,0)" if black_curves else "rgba(130,130,130,0)"),
                     hovertemplate="Q: %{x:.2f} m³/h<br>Valor: %{y:.2f}<extra></extra>",
                 )
             )
 
     if selected_curve_obj is not None:
-        if manual_use_raw and isinstance(selected_curve_obj, PumpCurveBase):
-            qq_sel, yy_sel = raw_curve_values(selected_curve_obj, metric, visco_cf=visco_cf)
-        else:
-            q_max_plot = selected_curve_obj.q_max if hasattr(selected_curve_obj, "q_max") else selected_curve_obj.base.q_max * selected_curve_obj.ratio
-            q_min_plot = selected_curve_obj.q_min if hasattr(selected_curve_obj, "q_min") else max(0.05, selected_curve_obj.base.q_min * selected_curve_obj.ratio)
-            qq_sel = np.linspace(q_min_plot, q_max_plot, n_points_selected)
-            yy_sel = curve_values(selected_curve_obj, metric, qq_sel, density=density, visco_cf=visco_cf)
+        q_max_plot = selected_curve_obj.q_max if hasattr(selected_curve_obj, "q_max") else selected_curve_obj.base.q_max * selected_curve_obj.ratio
+        q_min_plot = selected_curve_obj.q_min if hasattr(selected_curve_obj, "q_min") else max(0.05, selected_curve_obj.base.q_min * selected_curve_obj.ratio)
+        qq_sel = np.linspace(q_min_plot, q_max_plot, n_points_selected)
 
         fig.add_trace(
             go.Scatter(
                 x=qq_sel,
-                y=yy_sel,
-                mode="lines+markers",
+                y=curve_values(selected_curve_obj, metric, qq_sel, density=density, visco_cf=visco_cf),
+                mode="lines",
                 name=f"D = {selected_real_diam:.0f} mm" if selected_real_diam is not None else "Curva seleccionada",
                 line=dict(width=3, color=selected_color, shape=line_shape),
-                marker=dict(size=4, color="rgba(0,0,0,0)" if black_curves else "rgba(0,89,170,0)"),
                 hovertemplate="Q: %{x:.2f} m³/h<br>Valor: %{y:.2f}<extra></extra>",
             )
         )
@@ -1157,7 +1169,6 @@ def render_manual_interactive_curves(
             smooth_curves=True,
             highlight_curve_obj=highlight_curve_obj,
             highlight_q=highlight_q,
-            manual_use_raw=True,
         )
         event = st.plotly_chart(
             fig_h,
@@ -1167,21 +1178,15 @@ def render_manual_interactive_curves(
             selection_mode=("points",),
         )
 
-        selected_points = []
         try:
-            sel = getattr(event, "selection", None)
-            if sel:
-                if isinstance(sel, dict):
-                    selected_points = sel.get("points", [])
-                else:
-                    selected_points = getattr(sel, "points", [])
+            selected_points = event.selection["points"] if event and event.selection else []
         except Exception:
             selected_points = []
 
         if selected_points:
             point = selected_points[0]
             selected_q = float(point["x"])
-            curve_number = int(point.get("curve_number", point.get("curveNumber", 0)))
+            curve_number = int(point["curve_number"])
 
             selected_curve_for_point = None
             if show_all_diameters:
@@ -1213,7 +1218,6 @@ def render_manual_interactive_curves(
                 smooth_curves=True,
                 highlight_curve_obj=highlight_curve_obj,
                 highlight_q=highlight_q,
-                manual_use_raw=True,
             ),
             use_container_width=True,
         )
@@ -1233,7 +1237,6 @@ def render_manual_interactive_curves(
                 smooth_curves=True,
                 highlight_curve_obj=highlight_curve_obj,
                 highlight_q=highlight_q,
-                manual_use_raw=True,
             ),
             use_container_width=True,
         )
@@ -1253,7 +1256,6 @@ def render_manual_interactive_curves(
                 smooth_curves=True,
                 highlight_curve_obj=highlight_curve_obj,
                 highlight_q=highlight_q,
-                manual_use_raw=True,
             ),
             use_container_width=True,
         )
@@ -1295,36 +1297,30 @@ def evaluate_families(
     results: List[Dict] = []
 
     for fam in families:
-        valid_curves = [c for c in fam["curvas"] if c.get_h(q_req) >= h_req]
-        if valid_curves:
-            base_curve = valid_curves[0]
-        else:
-            base_curve = fam["curvas"][-1]
-
-        d_req = find_trim_diameter(q_req, h_req, base_curve, fam["D_min"], fam["D_max"])
-        if d_req is None:
+        d_req, interp_curve, curve_low, curve_high = find_interpolated_diameter_curve(fam, q_req, h_req)
+        if d_req is None or interp_curve is None:
             continue
 
         if not (fam["D_min"] <= d_req <= fam["D_max"]):
             continue
 
-        if base_curve.stable_q_min > q_req:
+        base_curve = interp_curve if isinstance(interp_curve, PumpCurveBase) else curve_high
+        if base_curve is not None and base_curve.stable_q_min > q_req:
             continue
 
-        trim_curve = TrimmedCurve(base_curve, d_req)
         op_q = find_operating_point(
-            trim_curve,
+            interp_curve,
             sys_curve,
-            q_max=base_curve.q_max * trim_curve.ratio,
+            q_max=interp_curve.q_max,
         )
         if op_q is None:
             op_q = q_req
 
-        h_op = trim_curve.get_h(op_q)
-        eta_op = trim_curve.get_eta(op_q) * visco_cf
-        p_kw = trim_curve.get_power(op_q, density=densidad, viscosity_cf=visco_cf)
-        npshr = trim_curve.get_npshr(op_q)
-        p_max = trim_curve.get_max_power(base_curve.q_max * trim_curve.ratio, density=densidad, viscosity_cf=visco_cf)
+        h_op = interp_curve.get_h(op_q)
+        eta_op = interp_curve.get_eta(op_q) * visco_cf
+        p_kw = interp_curve.get_power(op_q, density=densidad, viscosity_cf=visco_cf)
+        npshr = interp_curve.get_npshr(op_q)
+        p_max = interp_curve.get_max_power(interp_curve.q_max, density=densidad, viscosity_cf=visco_cf)
         motor_kw = select_motor(p_max)
         npsh_status = npsha >= (npshr + NPSH_MARGIN_M)
 
@@ -1342,7 +1338,7 @@ def evaluate_families(
                 "NPSHr (m)": round(npshr, 2),
                 "Status NPSH": npsh_status,
                 "Motor IEC (kW)": round(motor_kw, 2),
-                "_trim": trim_curve,
+                "_trim": interp_curve,
                 "_fam": fam,
                 "_sys_curve": sys_curve,
                 "_q_req": q_req,
@@ -1638,7 +1634,11 @@ def manual_selection_view(families: List[Dict]) -> None:
             selection_mode="single-row",
         )
 
-        selected_rows = extract_selected_rows(event)
+        try:
+            selected_rows = event.selection["rows"] if event and event.selection else []
+        except Exception:
+            selected_rows = []
+
         if selected_rows:
             st.session_state.manual_selected_table_row = int(selected_rows[0])
 
