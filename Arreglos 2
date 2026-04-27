@@ -22,3 +22,10 @@ En la selección de bombas por punto debajo de cada gráfico de H,POTENCIA, REND
 en la seleccion manual de bombas, en la tabla con todas las bombas Que no salga la columna seleccionar, sino que uno al apretar cualquier parte de la fila de la bomba se seleccione automaticamente
 Que en la selección manual de bombas un pueda escoger un diametro cualquiera que no esté en la base de datos y muestre los gráficos de igual manera.
 Que en la seleccion manual de bombas uno pueda seleccionar un punto SOLO DE LOS DIAMETROS MOSTRADOS,pasando el mouse por arriba y apretando, y que el punto se muestre en todos los otros graficos
+
+
+En graficos de selección por punto reemplazar "Valor en el punto" por Q, P2, NPSH Y "η" este ultimo corresponde  a la eficiencia
+El valor de P2 mostrarlo en kW como ahoraa y en HP
+En selección de bomba manual actualmente no se puede seleccionar una bomba para cambiar los graficos mostrados, haz que cuando se aprete el modelo que se quiere ver automaticamente muestre esas curvas
+En los graficos de seleccion manual de bombas, quiero que uno cuando pase el mouse por arriba de las curvas que se muestran y aprete en algun punto, nos de los valores en ese punto (que lo marque en rojo en todos los graficos, y que abajo de los graficos muestre los valores)
+Grundfos: Potencia: Polinomica grado 3, R2 99,9%. Wilo
