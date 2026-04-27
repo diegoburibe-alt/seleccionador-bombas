@@ -286,6 +286,7 @@ class PumpCurveBase:
         h_raw = np.array([p["H"] for p in self.puntos], dtype=float)
         eta_raw = np.array([p["eta"] for p in self.puntos], dtype=float)
         npsh_raw = np.array([p["NPSH"] for p in self.puntos], dtype=float)
+        p_raw = np.array([p.get("P", np.nan) for p in self.puntos], dtype=float)
 
         self.popt_h, _ = curve_fit(poly2, q_raw, h_raw)
         self.a, self.b, self.c = self.popt_h
@@ -306,6 +307,13 @@ class PumpCurveBase:
         self.q_min = float(np.min(self.unique_q))
         self.q_max = float(np.max(self.unique_q))
 
+        valid_p_mask = ~np.isnan(p_raw)
+        self.has_power_poly = bool(np.sum(valid_p_mask) >= 3)
+        if self.has_power_poly:
+            self.popt_p, _ = curve_fit(poly2, q_raw[valid_p_mask], p_raw[valid_p_mask])
+        else:
+            self.popt_p = None
+
         qq = np.linspace(max(0.1, self.q_min), self.q_max, 240)
         ee = self.interp_eta(qq)
         idx_bep = int(np.argmax(ee))
@@ -324,10 +332,9 @@ class PumpCurveBase:
         return float(self.interp_npsh(q_eval))
 
     def get_power(self, q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
-        h = self.get_h(q)
-        eta = max(0.01, self.get_eta(q) * viscosity_cf)
-        power_w = (q / 3600.0) * h * density * 9.81 / (eta / 100.0)
-        return float(power_w / 1000.0)
+        if self.has_power_poly and self.popt_p is not None:
+            return max(0.0, float(poly2(np.array([q]), *self.popt_p)[0]))
+        return 0.0
 
 
 class TrimmedCurve:
@@ -342,19 +349,15 @@ class TrimmedCurve:
 
     def get_eta(self, q: float) -> float:
         q_base = q / self.ratio
-        base_eta = self.base.get_eta(q_base)
-        penalty = max(0.0, 1.0 - self.ratio) * 10.0
-        return max(0.0, base_eta - penalty)
+        return self.base.get_eta(q_base)
 
     def get_npshr(self, q: float) -> float:
         q_base = q / self.ratio
         return self.base.get_npshr(q_base) * (self.ratio ** 2)
 
     def get_power(self, q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
-        h = self.get_h(q)
-        eta = max(0.01, self.get_eta(q) * viscosity_cf)
-        power_w = (q / 3600.0) * h * density * 9.81 / (eta / 100.0)
-        return float(power_w / 1000.0)
+        q_base = q / self.ratio
+        return max(0.0, (self.ratio ** 3) * self.base.get_power(q_base, density=density, viscosity_cf=viscosity_cf))
 
     def get_max_power(self, end_q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
         qq = np.linspace(max(0.1, 0.02 * end_q), max(end_q, 0.1), 120)
@@ -425,6 +428,7 @@ class PumpDatabase:
 
         series_col = "Serie" if "Serie" in df.columns else None
         has_rpm = "RPM" in df.columns
+        has_pot_kw = "pot_kw" in df.columns
 
         groupby_cols = []
         if series_col:
@@ -464,8 +468,9 @@ class PumpDatabase:
                     h = safe_float(row["H_m"])
                     eta = safe_float(row.get("h_%", row.get("eta", 0.0)), 0.0)
                     npsh = safe_float(row.get("NPSH_m", row.get("NPSH", 0.0)), 0.0)
+                    p = safe_float(row.get("pot_kw", np.nan), np.nan) if has_pot_kw else np.nan
                     if not np.isnan(q) and not np.isnan(h):
-                        puntos.append({"Q": q, "H": h, "eta": eta, "NPSH": npsh})
+                        puntos.append({"Q": q, "H": h, "eta": eta, "NPSH": npsh, "P": p})
 
                 if len(puntos) >= 3:
                     try:
