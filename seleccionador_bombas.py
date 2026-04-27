@@ -236,6 +236,23 @@ def display_serie_value(marca: str, serie: Optional[str] = None) -> str:
     return str(marca)
 
 
+def extract_selected_rows(event) -> List[int]:
+    if event is None:
+        return []
+    sel = getattr(event, "selection", None)
+    if sel is None:
+        return []
+    if isinstance(sel, dict):
+        return sel.get("rows", [])
+    rows_attr = getattr(sel, "rows", None)
+    if rows_attr is not None:
+        return rows_attr
+    try:
+        return sel["rows"]
+    except Exception:
+        return []
+
+
 # ==============================
 # Modelo hidráulico
 # ==============================
@@ -286,6 +303,13 @@ class PumpCurveBase:
         h_raw = np.array([p["H"] for p in self.puntos], dtype=float)
         eta_raw = np.array([p["eta"] for p in self.puntos], dtype=float)
         npsh_raw = np.array([p["NPSH"] for p in self.puntos], dtype=float)
+        p_raw = np.array([p.get("P", np.nan) for p in self.puntos], dtype=float)
+
+        self.raw_q = q_raw
+        self.raw_h = h_raw
+        self.raw_eta = eta_raw
+        self.raw_npsh = npsh_raw
+        self.raw_p = p_raw
 
         self.popt_h, _ = curve_fit(poly2, q_raw, h_raw)
         self.a, self.b, self.c = self.popt_h
@@ -299,12 +323,18 @@ class PumpCurveBase:
         self.unique_q = unique_q
         self.eta_values = eta_raw[unique_idx]
         self.npsh_values = npsh_raw[unique_idx]
-
         self.interp_eta = PchipInterpolator(self.unique_q, self.eta_values)
         self.interp_npsh = PchipInterpolator(self.unique_q, self.npsh_values)
 
         self.q_min = float(np.min(self.unique_q))
         self.q_max = float(np.max(self.unique_q))
+
+        valid_p_mask = ~np.isnan(p_raw)
+        self.has_power_poly = bool(np.sum(valid_p_mask) >= 3)
+        if self.has_power_poly:
+            self.popt_p, _ = curve_fit(poly2, q_raw[valid_p_mask], p_raw[valid_p_mask])
+        else:
+            self.popt_p = None
 
         qq = np.linspace(max(0.1, self.q_min), self.q_max, 240)
         ee = self.interp_eta(qq)
@@ -324,6 +354,8 @@ class PumpCurveBase:
         return float(self.interp_npsh(q_eval))
 
     def get_power(self, q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
+        if self.has_power_poly and self.popt_p is not None:
+            return max(0.0, float(poly2(np.array([q]), *self.popt_p)[0]))
         h = self.get_h(q)
         eta = max(0.01, self.get_eta(q) * viscosity_cf)
         power_w = (q / 3600.0) * h * density * 9.81 / (eta / 100.0)
@@ -335,6 +367,8 @@ class TrimmedCurve:
         self.base = base_curve
         self.diam = float(trim_diam)
         self.ratio = self.diam / self.base.diam
+        self.q_min = max(0.05, self.base.q_min * self.ratio)
+        self.q_max = self.base.q_max * self.ratio
 
     def get_h(self, q: float) -> float:
         q_base = q / self.ratio
@@ -351,10 +385,8 @@ class TrimmedCurve:
         return self.base.get_npshr(q_base) * (self.ratio ** 2)
 
     def get_power(self, q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
-        h = self.get_h(q)
-        eta = max(0.01, self.get_eta(q) * viscosity_cf)
-        power_w = (q / 3600.0) * h * density * 9.81 / (eta / 100.0)
-        return float(power_w / 1000.0)
+        q_base = q / self.ratio
+        return max(0.0, (self.ratio ** 3) * self.base.get_power(q_base, density=density, viscosity_cf=viscosity_cf))
 
     def get_max_power(self, end_q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
         qq = np.linspace(max(0.1, 0.02 * end_q), max(end_q, 0.1), 120)
@@ -386,6 +418,7 @@ class PumpDatabase:
 
         series_col = "Serie" if "Serie" in df.columns else None
         has_rpm = "RPM" in df.columns
+        has_pot_kw = "pot_kw" in df.columns
 
         groupby_cols = []
         if series_col:
@@ -417,7 +450,7 @@ class PumpDatabase:
 
             curvas: List[PumpCurveBase] = []
             for d in diametros:
-                group_d = group[group["diametro_mm"].astype(float) == d]
+                group_d = group[group["diametro_mm"].astype(float) == d].sort_values("Q_m3/h")
                 puntos: List[Dict[str, float]] = []
 
                 for _, row in group_d.iterrows():
@@ -425,8 +458,9 @@ class PumpDatabase:
                     h = safe_float(row["H_m"])
                     eta = safe_float(row.get("h_%", row.get("eta", 0.0)), 0.0)
                     npsh = safe_float(row.get("NPSH_m", row.get("NPSH", 0.0)), 0.0)
+                    p = safe_float(row.get("pot_kw", np.nan), np.nan) if has_pot_kw else np.nan
                     if not np.isnan(q) and not np.isnan(h):
-                        puntos.append({"Q": q, "H": h, "eta": eta, "NPSH": npsh})
+                        puntos.append({"Q": q, "H": h, "eta": eta, "NPSH": npsh, "P": p})
 
                 if len(puntos) >= 3:
                     try:
@@ -772,6 +806,22 @@ def curve_values(
     return values
 
 
+def raw_curve_values(curve_obj: PumpCurveBase, metric: str, visco_cf: float = 1.0) -> Tuple[np.ndarray, np.ndarray]:
+    x = curve_obj.raw_q
+    if metric == "H":
+        y = curve_obj.raw_h
+    elif metric == "ETA":
+        y = curve_obj.raw_eta * visco_cf
+    elif metric == "P":
+        if np.sum(~np.isnan(curve_obj.raw_p)) >= 1:
+            mask = ~np.isnan(curve_obj.raw_p)
+            return x[mask], curve_obj.raw_p[mask]
+        y = np.array([curve_obj.get_power(float(q)) for q in x], dtype=float)
+    else:
+        y = curve_obj.raw_npsh
+    return x, y
+
+
 def apply_graph_box(fig: go.Figure) -> None:
     fig.update_layout(
         plot_bgcolor="white",
@@ -820,6 +870,7 @@ def plot_family_metric(
     smooth_curves: bool = False,
     highlight_curve_obj=None,
     highlight_q: Optional[float] = None,
+    manual_use_raw: bool = False,
 ) -> go.Figure:
     fig = go.Figure()
 
@@ -831,30 +882,40 @@ def plot_family_metric(
 
     if show_all_diameters:
         for curve in fam["curvas"]:
-            qq = np.linspace(curve.q_min, curve.q_max, n_points)
+            if manual_use_raw:
+                qq, yy = raw_curve_values(curve, metric, visco_cf=visco_cf)
+            else:
+                qq = np.linspace(curve.q_min, curve.q_max, n_points)
+                yy = curve_values(curve, metric, qq, density=density, visco_cf=visco_cf)
             fig.add_trace(
                 go.Scatter(
                     x=qq,
-                    y=curve_values(curve, metric, qq, density=density, visco_cf=visco_cf),
-                    mode="lines",
+                    y=yy,
+                    mode="lines+markers",
                     name=f"D={curve.diam:.0f} mm",
                     line=dict(width=1.5, color=base_color, shape=line_shape),
+                    marker=dict(size=4, color="rgba(0,0,0,0)" if black_curves else "rgba(130,130,130,0)"),
                     hovertemplate="Q: %{x:.2f} m³/h<br>Valor: %{y:.2f}<extra></extra>",
                 )
             )
 
     if selected_curve_obj is not None:
-        q_max_plot = selected_curve_obj.q_max if hasattr(selected_curve_obj, "q_max") else selected_curve_obj.base.q_max * selected_curve_obj.ratio
-        q_min_plot = selected_curve_obj.q_min if hasattr(selected_curve_obj, "q_min") else max(0.05, selected_curve_obj.base.q_min * selected_curve_obj.ratio)
-        qq_sel = np.linspace(q_min_plot, q_max_plot, n_points_selected)
+        if manual_use_raw and isinstance(selected_curve_obj, PumpCurveBase):
+            qq_sel, yy_sel = raw_curve_values(selected_curve_obj, metric, visco_cf=visco_cf)
+        else:
+            q_max_plot = selected_curve_obj.q_max if hasattr(selected_curve_obj, "q_max") else selected_curve_obj.base.q_max * selected_curve_obj.ratio
+            q_min_plot = selected_curve_obj.q_min if hasattr(selected_curve_obj, "q_min") else max(0.05, selected_curve_obj.base.q_min * selected_curve_obj.ratio)
+            qq_sel = np.linspace(q_min_plot, q_max_plot, n_points_selected)
+            yy_sel = curve_values(selected_curve_obj, metric, qq_sel, density=density, visco_cf=visco_cf)
 
         fig.add_trace(
             go.Scatter(
                 x=qq_sel,
-                y=curve_values(selected_curve_obj, metric, qq_sel, density=density, visco_cf=visco_cf),
-                mode="lines",
+                y=yy_sel,
+                mode="lines+markers",
                 name=f"D = {selected_real_diam:.0f} mm" if selected_real_diam is not None else "Curva seleccionada",
                 line=dict(width=3, color=selected_color, shape=line_shape),
+                marker=dict(size=4, color="rgba(0,0,0,0)" if black_curves else "rgba(0,89,170,0)"),
                 hovertemplate="Q: %{x:.2f} m³/h<br>Valor: %{y:.2f}<extra></extra>",
             )
         )
@@ -1096,6 +1157,7 @@ def render_manual_interactive_curves(
             smooth_curves=True,
             highlight_curve_obj=highlight_curve_obj,
             highlight_q=highlight_q,
+            manual_use_raw=True,
         )
         event = st.plotly_chart(
             fig_h,
@@ -1105,15 +1167,21 @@ def render_manual_interactive_curves(
             selection_mode=("points",),
         )
 
+        selected_points = []
         try:
-            selected_points = event.selection["points"] if event and event.selection else []
+            sel = getattr(event, "selection", None)
+            if sel:
+                if isinstance(sel, dict):
+                    selected_points = sel.get("points", [])
+                else:
+                    selected_points = getattr(sel, "points", [])
         except Exception:
             selected_points = []
 
         if selected_points:
             point = selected_points[0]
             selected_q = float(point["x"])
-            curve_number = int(point["curve_number"])
+            curve_number = int(point.get("curve_number", point.get("curveNumber", 0)))
 
             selected_curve_for_point = None
             if show_all_diameters:
@@ -1145,6 +1213,7 @@ def render_manual_interactive_curves(
                 smooth_curves=True,
                 highlight_curve_obj=highlight_curve_obj,
                 highlight_q=highlight_q,
+                manual_use_raw=True,
             ),
             use_container_width=True,
         )
@@ -1164,6 +1233,7 @@ def render_manual_interactive_curves(
                 smooth_curves=True,
                 highlight_curve_obj=highlight_curve_obj,
                 highlight_q=highlight_q,
+                manual_use_raw=True,
             ),
             use_container_width=True,
         )
@@ -1183,6 +1253,7 @@ def render_manual_interactive_curves(
                 smooth_curves=True,
                 highlight_curve_obj=highlight_curve_obj,
                 highlight_q=highlight_q,
+                manual_use_raw=True,
             ),
             use_container_width=True,
         )
@@ -1567,11 +1638,7 @@ def manual_selection_view(families: List[Dict]) -> None:
             selection_mode="single-row",
         )
 
-        try:
-            selected_rows = event.selection["rows"] if event and event.selection else []
-        except Exception:
-            selected_rows = []
-
+        selected_rows = extract_selected_rows(event)
         if selected_rows:
             st.session_state.manual_selected_table_row = int(selected_rows[0])
 
