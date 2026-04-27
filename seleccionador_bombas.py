@@ -1,7 +1,7 @@
 import os
 import re
 import base64
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -544,6 +544,11 @@ def init_session_state() -> None:
         "username": "",
         "page": "login",
         "loaded_families": None,
+        "manual_selected_table_row": 0,
+        "manual_selected_point_q": None,
+        "manual_selected_point_curve_diam": None,
+        "manual_selected_point_model": None,
+        "manual_selected_point_show_all": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -788,12 +793,22 @@ def apply_graph_box(fig: go.Figure) -> None:
     )
 
 
+def resolve_manual_curve(fam: Dict, requested_diam: float):
+    for curve in fam["curvas"]:
+        if abs(curve.diam - requested_diam) < 1e-9:
+            return curve
+
+    candidates = [c for c in fam["curvas"] if c.diam >= requested_diam]
+    base_curve = candidates[0] if candidates else fam["curvas"][-1]
+    return TrimmedCurve(base_curve, requested_diam)
+
+
 def plot_family_metric(
     fam: Dict,
     metric: str,
     title: str,
     show_all_diameters: bool,
-    selected_trim: Optional[TrimmedCurve] = None,
+    selected_curve_obj=None,
     selected_real_diam: Optional[float] = None,
     op_q: Optional[float] = None,
     q_req: Optional[float] = None,
@@ -803,6 +818,8 @@ def plot_family_metric(
     visco_cf: float = 1.0,
     black_curves: bool = False,
     smooth_curves: bool = False,
+    highlight_curve_obj=None,
+    highlight_q: Optional[float] = None,
 ) -> go.Figure:
     fig = go.Figure()
 
@@ -826,39 +843,17 @@ def plot_family_metric(
                 )
             )
 
-    if selected_trim is not None:
-        q_max_plot = selected_trim.base.q_max * selected_trim.ratio
-        qq_sel = np.linspace(
-            max(0.05, selected_trim.base.q_min * selected_trim.ratio),
-            q_max_plot,
-            n_points_selected,
-        )
+    if selected_curve_obj is not None:
+        q_max_plot = selected_curve_obj.q_max if hasattr(selected_curve_obj, "q_max") else selected_curve_obj.base.q_max * selected_curve_obj.ratio
+        q_min_plot = selected_curve_obj.q_min if hasattr(selected_curve_obj, "q_min") else max(0.05, selected_curve_obj.base.q_min * selected_curve_obj.ratio)
+        qq_sel = np.linspace(q_min_plot, q_max_plot, n_points_selected)
+
         fig.add_trace(
             go.Scatter(
                 x=qq_sel,
-                y=curve_values(selected_trim, metric, qq_sel, density=density, visco_cf=visco_cf),
+                y=curve_values(selected_curve_obj, metric, qq_sel, density=density, visco_cf=visco_cf),
                 mode="lines",
-                name=(
-                    f"Diámetro escogido = {selected_trim.diam:.0f} mm"
-                    if selected_real_diam is None
-                    else f"D = {selected_real_diam:.0f} mm"
-                ),
-                line=dict(width=3, color=selected_color, shape=line_shape),
-                hovertemplate="Q: %{x:.2f} m³/h<br>Valor: %{y:.2f}<extra></extra>",
-            )
-        )
-    elif not show_all_diameters and fam["curvas"]:
-        curve = min(
-            fam["curvas"],
-            key=lambda c: abs(c.diam - (selected_real_diam or fam["curvas"][-1].diam)),
-        )
-        qq = np.linspace(curve.q_min, curve.q_max, n_points_selected)
-        fig.add_trace(
-            go.Scatter(
-                x=qq,
-                y=curve_values(curve, metric, qq, density=density, visco_cf=visco_cf),
-                mode="lines",
-                name=f"D={curve.diam:.0f} mm",
+                name=f"D = {selected_real_diam:.0f} mm" if selected_real_diam is not None else "Curva seleccionada",
                 line=dict(width=3, color=selected_color, shape=line_shape),
                 hovertemplate="Q: %{x:.2f} m³/h<br>Valor: %{y:.2f}<extra></extra>",
             )
@@ -896,15 +891,15 @@ def plot_family_metric(
             )
         )
 
-    if op_q is not None and selected_trim is not None:
+    if op_q is not None and selected_curve_obj is not None:
         if metric == "H":
-            op_y = selected_trim.get_h(op_q)
+            op_y = selected_curve_obj.get_h(op_q)
         elif metric == "ETA":
-            op_y = selected_trim.get_eta(op_q) * visco_cf
+            op_y = selected_curve_obj.get_eta(op_q) * visco_cf
         elif metric == "P":
-            op_y = selected_trim.get_power(op_q, density=density, viscosity_cf=visco_cf)
+            op_y = selected_curve_obj.get_power(op_q, density=density, viscosity_cf=visco_cf)
         else:
-            op_y = selected_trim.get_npshr(op_q)
+            op_y = selected_curve_obj.get_npshr(op_q)
 
         fig.add_trace(
             go.Scatter(
@@ -914,6 +909,27 @@ def plot_family_metric(
                 name="Punto operativo",
                 marker=dict(size=11, color="#dc2626"),
                 hovertemplate="Q: %{x:.1f}<br>Valor: %{y:.2f}<extra></extra>",
+            )
+        )
+
+    if highlight_curve_obj is not None and highlight_q is not None:
+        if metric == "H":
+            high_y = highlight_curve_obj.get_h(highlight_q)
+        elif metric == "ETA":
+            high_y = highlight_curve_obj.get_eta(highlight_q) * visco_cf
+        elif metric == "P":
+            high_y = highlight_curve_obj.get_power(highlight_q, density=density, viscosity_cf=visco_cf)
+        else:
+            high_y = highlight_curve_obj.get_npshr(highlight_q)
+
+        fig.add_trace(
+            go.Scatter(
+                x=[highlight_q],
+                y=[high_y],
+                mode="markers",
+                name="Punto seleccionado",
+                marker=dict(size=11, color="#dc2626"),
+                hovertemplate="Q: %{x:.2f}<br>Valor: %{y:.2f}<extra></extra>",
             )
         )
 
@@ -942,10 +958,10 @@ def plot_family_metric(
     return fig
 
 
-def render_characteristic_curves(
+def render_characteristic_curves_point(
     fam: Dict,
     show_all_diameters: bool,
-    selected_trim: Optional[TrimmedCurve] = None,
+    selected_curve_obj=None,
     selected_real_diam: Optional[float] = None,
     op_q: Optional[float] = None,
     q_req: Optional[float] = None,
@@ -953,8 +969,7 @@ def render_characteristic_curves(
     sys_curve: Optional[SystemCurve] = None,
     density: float = 1000.0,
     visco_cf: float = 1.0,
-    black_curves: bool = False,
-    smooth_curves: bool = False,
+    values_at_point: Optional[Dict[str, float]] = None,
 ) -> None:
     st.subheader("Curvas Caracteristicas")
     c1, c2 = st.columns(2)
@@ -967,7 +982,7 @@ def render_characteristic_curves(
                 metric="H",
                 title="Altura",
                 show_all_diameters=show_all_diameters,
-                selected_trim=selected_trim,
+                selected_curve_obj=selected_curve_obj,
                 selected_real_diam=selected_real_diam,
                 op_q=op_q,
                 q_req=q_req,
@@ -975,11 +990,11 @@ def render_characteristic_curves(
                 sys_curve=sys_curve,
                 density=density,
                 visco_cf=visco_cf,
-                black_curves=black_curves,
-                smooth_curves=smooth_curves,
             ),
             use_container_width=True,
         )
+        if values_at_point is not None:
+            st.caption(f"Valor en el punto: {fmt1(values_at_point['H'])} m")
 
     with c2:
         st.plotly_chart(
@@ -988,13 +1003,148 @@ def render_characteristic_curves(
                 metric="ETA",
                 title="Eficiencia",
                 show_all_diameters=show_all_diameters,
-                selected_trim=selected_trim,
+                selected_curve_obj=selected_curve_obj,
                 selected_real_diam=selected_real_diam,
                 op_q=op_q,
                 density=density,
                 visco_cf=visco_cf,
-                black_curves=black_curves,
-                smooth_curves=smooth_curves,
+            ),
+            use_container_width=True,
+        )
+        if values_at_point is not None:
+            st.caption(f"Valor en el punto: {fmt2(values_at_point['ETA'])} %")
+
+    with c3:
+        st.plotly_chart(
+            plot_family_metric(
+                fam=fam,
+                metric="P",
+                title="Potencia",
+                show_all_diameters=show_all_diameters,
+                selected_curve_obj=selected_curve_obj,
+                selected_real_diam=selected_real_diam,
+                op_q=op_q,
+                density=density,
+                visco_cf=visco_cf,
+            ),
+            use_container_width=True,
+        )
+        if values_at_point is not None:
+            st.caption(f"Valor en el punto: {fmt2(values_at_point['P'])} kW")
+
+    with c4:
+        st.plotly_chart(
+            plot_family_metric(
+                fam=fam,
+                metric="NPSH",
+                title="NPSH",
+                show_all_diameters=show_all_diameters,
+                selected_curve_obj=selected_curve_obj,
+                selected_real_diam=selected_real_diam,
+                op_q=op_q,
+                density=density,
+                visco_cf=visco_cf,
+            ),
+            use_container_width=True,
+        )
+        if values_at_point is not None:
+            st.caption(f"Valor en el punto: {fmt2(values_at_point['NPSH'])} m")
+
+
+def render_manual_interactive_curves(
+    fam: Dict,
+    show_all_diameters: bool,
+    selected_curve_obj=None,
+    selected_real_diam: Optional[float] = None,
+    density: float = 1000.0,
+    visco_cf: float = 1.0,
+    model_key: str = "",
+) -> None:
+    st.subheader("Curvas Características")
+    c1, c2 = st.columns(2)
+    c3, c4 = st.columns(2)
+
+    highlight_curve_obj = None
+    highlight_q = None
+    if (
+        st.session_state.manual_selected_point_model == fam["modelo"]
+        and st.session_state.manual_selected_point_show_all == show_all_diameters
+        and st.session_state.manual_selected_point_q is not None
+    ):
+        highlight_q = float(st.session_state.manual_selected_point_q)
+        curve_diam = st.session_state.manual_selected_point_curve_diam
+        if show_all_diameters:
+            for curve in fam["curvas"]:
+                if abs(curve.diam - curve_diam) < 1e-6:
+                    highlight_curve_obj = curve
+                    break
+        else:
+            if selected_curve_obj is not None and abs(selected_curve_obj.diam - curve_diam) < 1e-6:
+                highlight_curve_obj = selected_curve_obj
+
+    with c1:
+        fig_h = plot_family_metric(
+            fam=fam,
+            metric="H",
+            title="Altura",
+            show_all_diameters=show_all_diameters,
+            selected_curve_obj=selected_curve_obj,
+            selected_real_diam=selected_real_diam,
+            density=density,
+            visco_cf=visco_cf,
+            black_curves=True,
+            smooth_curves=True,
+            highlight_curve_obj=highlight_curve_obj,
+            highlight_q=highlight_q,
+        )
+        event = st.plotly_chart(
+            fig_h,
+            use_container_width=True,
+            key=f"manual_h_plot_{model_key}",
+            on_select="rerun",
+            selection_mode=("points",),
+        )
+
+        try:
+            selected_points = event.selection["points"] if event and event.selection else []
+        except Exception:
+            selected_points = []
+
+        if selected_points:
+            point = selected_points[0]
+            selected_q = float(point["x"])
+            curve_number = int(point["curve_number"])
+
+            selected_curve_for_point = None
+            if show_all_diameters:
+                if 0 <= curve_number < len(fam["curvas"]):
+                    selected_curve_for_point = fam["curvas"][curve_number]
+            else:
+                selected_curve_for_point = selected_curve_obj
+
+            if selected_curve_for_point is not None:
+                st.session_state.manual_selected_point_q = selected_q
+                st.session_state.manual_selected_point_curve_diam = float(selected_curve_for_point.diam)
+                st.session_state.manual_selected_point_model = fam["modelo"]
+                st.session_state.manual_selected_point_show_all = show_all_diameters
+                highlight_q = selected_q
+                highlight_curve_obj = selected_curve_for_point
+
+    with c2:
+        st.plotly_chart(
+            plot_family_metric(
+                fam=fam,
+                metric="ETA",
+                title="Eficiencia",
+                show_all_diameters=show_all_diameters,
+                selected_curve_obj=selected_curve_obj,
+                selected_real_diam=selected_real_diam,
+                density=density,
+                visco_cf=visco_cf,
+                black_curves=True,
+                smooth_curves=True,
+                highlight_curve_obj=highlight_curve_obj,
+                highlight_q=highlight_q,
             ),
             use_container_width=True,
         )
@@ -1006,13 +1156,14 @@ def render_characteristic_curves(
                 metric="P",
                 title="Potencia",
                 show_all_diameters=show_all_diameters,
-                selected_trim=selected_trim,
+                selected_curve_obj=selected_curve_obj,
                 selected_real_diam=selected_real_diam,
-                op_q=op_q,
                 density=density,
                 visco_cf=visco_cf,
-                black_curves=black_curves,
-                smooth_curves=smooth_curves,
+                black_curves=True,
+                smooth_curves=True,
+                highlight_curve_obj=highlight_curve_obj,
+                highlight_q=highlight_q,
             ),
             use_container_width=True,
         )
@@ -1024,13 +1175,14 @@ def render_characteristic_curves(
                 metric="NPSH",
                 title="NPSH",
                 show_all_diameters=show_all_diameters,
-                selected_trim=selected_trim,
+                selected_curve_obj=selected_curve_obj,
                 selected_real_diam=selected_real_diam,
-                op_q=op_q,
                 density=density,
                 visco_cf=visco_cf,
-                black_curves=black_curves,
-                smooth_curves=smooth_curves,
+                black_curves=True,
+                smooth_curves=True,
+                highlight_curve_obj=highlight_curve_obj,
+                highlight_q=highlight_q,
             ),
             use_container_width=True,
         )
@@ -1134,15 +1286,6 @@ def evaluate_families(
 
 
 def hydraulic_selection_view(families: List[Dict]) -> None:
-    st.sidebar.header("0. Filtro de serie")
-    series_options = sorted(list({fam["serie_display"] for fam in families}))
-    selected_series = st.sidebar.multiselect("Serie", series_options)
-
-    if selected_series:
-        families_to_use = [fam for fam in families if fam["serie_display"] in selected_series]
-    else:
-        families_to_use = families
-
     st.sidebar.header("1. Parámetros del Fluido")
     fluid_name = st.sidebar.text_input("Fluido", "Agua limpia")
     densidad = st.sidebar.number_input("Densidad (kg/m³)", value=1000.0, step=10.0, format="%.2f")
@@ -1176,7 +1319,7 @@ def hydraulic_selection_view(families: List[Dict]) -> None:
     st.caption(f"Punto requerido: Q = {fmt1(q_req)} m³/h · H = {fmt1(h_req)} m")
 
     results = evaluate_families(
-        families=families_to_use,
+        families=families,
         q_req=q_req,
         h_req=h_req,
         npsha=npsha,
@@ -1191,8 +1334,20 @@ def hydraulic_selection_view(families: List[Dict]) -> None:
         st.warning("No se encontraron bombas que cumplan con el punto solicitado dentro del rango real de diámetros del modelo.")
         return
 
+    series_options = sorted(list({r["Serie"] for r in results}))
+    selected_series = st.multiselect("Serie", series_options, key="hydraulic_series_filter")
+
+    if selected_series:
+        filtered_results = [r for r in results if r["Serie"] in selected_series]
+    else:
+        filtered_results = results
+
+    if not filtered_results:
+        st.warning("No hay bombas para la serie seleccionada.")
+        return
+
     st.subheader("Bombas que cumplen con los requisitos")
-    df_res = pd.DataFrame(results).drop(
+    df_res = pd.DataFrame(filtered_results).drop(
         columns=["_trim", "_fam", "_sys_curve", "_q_req", "_h_req", "_visco_cf", "_densidad", "Motor IEC (kW)"]
     )
 
@@ -1221,15 +1376,15 @@ def hydraulic_selection_view(families: List[Dict]) -> None:
 
     labels = [
         f"{r['Serie']} | {r['Modelo']} | {fmt0(r['Polos'])} polos | η={fmt2(r['Eficiencia (%)'])}% | D={fmt0(r['D_Impulsor (mm)'])} mm"
-        for r in results
+        for r in filtered_results
     ]
     selected_idx = st.selectbox(
         "Selecciona una bomba para revisar curvas",
-        range(len(results)),
+        range(len(filtered_results)),
         format_func=lambda i: labels[i],
     )
 
-    selected = results[selected_idx]
+    selected = filtered_results[selected_idx]
     fam = selected["_fam"]
     trim_curve = selected["_trim"]
 
@@ -1245,10 +1400,17 @@ def hydraulic_selection_view(families: List[Dict]) -> None:
     )
     detail_cols[4].metric("NPSH", "OK" if selected["Status NPSH"] else "Revisar")
 
-    render_characteristic_curves(
+    values_at_point = {
+        "H": float(selected["H Op. (m)"]),
+        "ETA": float(selected["Eficiencia (%)"]),
+        "P": float(selected["Potencia (kW)"]),
+        "NPSH": float(selected["NPSHr (m)"]),
+    }
+
+    render_characteristic_curves_point(
         fam=fam,
         show_all_diameters=show_all_diameters,
-        selected_trim=trim_curve,
+        selected_curve_obj=trim_curve,
         selected_real_diam=selected["D_Impulsor (mm)"],
         op_q=selected["Q Op. (m3/h)"],
         q_req=q_req,
@@ -1256,6 +1418,7 @@ def hydraulic_selection_view(families: List[Dict]) -> None:
         sys_curve=selected["_sys_curve"],
         density=densidad,
         visco_cf=selected["_visco_cf"],
+        values_at_point=values_at_point,
     )
 
     st.markdown("#### Datos de la bomba seleccionada")
@@ -1386,7 +1549,6 @@ def manual_selection_view(families: List[Dict]) -> None:
 
         table_display = pd.DataFrame(
             {
-                "Seleccionar": [False] * len(filtered),
                 "Serie": filtered["Serie"],
                 "Modelo": filtered["Modelo"],
                 "Polos": filtered["Polos"].apply(fmt0),
@@ -1396,25 +1558,24 @@ def manual_selection_view(families: List[Dict]) -> None:
             }
         )
 
-        edited_table = st.data_editor(
+        event = st.dataframe(
             table_display,
             use_container_width=True,
             hide_index=True,
-            key="manual_selection_table",
-            disabled=["Serie", "Modelo", "Polos", "Impulsor actual [mm]", "Descarga DN", "RPM"],
-            column_config={
-                "Seleccionar": st.column_config.CheckboxColumn("Seleccionar", help="Selecciona una fila"),
-            },
+            key="manual_interactive_table",
+            on_select="rerun",
+            selection_mode="single-row",
         )
 
-        selected_rows = edited_table.index[edited_table["Seleccionar"]].tolist()
-        if len(selected_rows) > 1:
-            st.warning("Selecciona solo un modelo. Se usará la primera fila marcada.")
+        try:
+            selected_rows = event.selection["rows"] if event and event.selection else []
+        except Exception:
+            selected_rows = []
 
-        if len(selected_rows) >= 1:
-            selection_index = int(selected_rows[0])
-        else:
-            selection_index = 0
+        if selected_rows:
+            st.session_state.manual_selected_table_row = int(selected_rows[0])
+
+        selection_index = min(st.session_state.manual_selected_table_row, len(filtered) - 1)
 
         st.markdown("---")
 
@@ -1428,13 +1589,23 @@ def manual_selection_view(families: List[Dict]) -> None:
         selected_row = filtered.iloc[selection_index]
         fam = selected_row["_fam"]
 
+        selected_curve_obj = None
         selected_real_diam = None
+
         if not show_all_diameters:
-            selected_real_diam = st.selectbox(
-                "Diámetro a mostrar",
-                fam["diametros_disponibles"],
-                format_func=lambda x: f"{round(x):.0f} mm",
+            default_diam = int(round(selected_row["D máx. (mm)"]))
+            selected_real_diam = st.number_input(
+                "Diámetro a mostrar (mm)",
+                min_value=float(int(round(selected_row["D mín. (mm)"]))),
+                max_value=float(int(round(selected_row["D máx. (mm)"]))),
+                value=float(default_diam),
+                step=1.0,
+                format="%.0f",
             )
+            selected_curve_obj = resolve_manual_curve(fam, float(selected_real_diam))
+        else:
+            selected_real_diam = None
+            selected_curve_obj = None
 
         st.markdown(f"#### {selected_row['Modelo']} · {fmt0(selected_row['Polos'])} polos")
 
@@ -1446,14 +1617,14 @@ def manual_selection_view(families: List[Dict]) -> None:
         kpi_cols[4].metric("D mín. (mm)", fmt0(selected_row["D mín. (mm)"]))
         kpi_cols[5].metric("D máx. (mm)", fmt0(selected_row["D máx. (mm)"]))
 
-        render_characteristic_curves(
+        render_manual_interactive_curves(
             fam=fam,
             show_all_diameters=show_all_diameters,
+            selected_curve_obj=selected_curve_obj,
             selected_real_diam=selected_real_diam,
             density=1000.0,
             visco_cf=1.0,
-            black_curves=True,
-            smooth_curves=True,
+            model_key=f"{selected_row['Modelo']}_{fmt0(selected_row['Polos'])}",
         )
 
         st.markdown("#### Diámetros presentes en la base de datos")
