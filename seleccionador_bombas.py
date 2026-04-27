@@ -1,3 +1,4 @@
+
 import os
 import re
 import base64
@@ -7,7 +8,6 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from scipy.interpolate import PchipInterpolator
 from scipy.optimize import brentq, curve_fit
 
 
@@ -255,8 +255,8 @@ def select_motor(max_power_kw: float) -> float:
     return IEC_MOTORS_KW[-1]
 
 
-def poly2(x: np.ndarray, a: float, b: float, c: float) -> np.ndarray:
-    return a * (x ** 2) + b * x + c
+def poly3(x: np.ndarray, a: float, b: float, c: float, d: float) -> np.ndarray:
+    return a * (x ** 3) + b * (x ** 2) + c * x + d
 
 
 def infer_poles_from_rpm(rpm: Optional[float]) -> Optional[int]:
@@ -287,47 +287,51 @@ class PumpCurveBase:
         eta_raw = np.array([p["eta"] for p in self.puntos], dtype=float)
         npsh_raw = np.array([p["NPSH"] for p in self.puntos], dtype=float)
 
-        self.popt_h, _ = curve_fit(poly2, q_raw, h_raw)
-        self.a, self.b, self.c = self.popt_h
+        # P2 de referencia construida desde los datos base (agua, visco_cf=1)
+        eta_safe = np.maximum(eta_raw / 100.0, 0.01)
+        p2_raw = ((q_raw / 3600.0) * h_raw * 1000.0 * 9.81 / eta_safe) / 1000.0
 
-        if self.a < 0 and self.b > 0:
-            self.stable_q_min = max(0.0, -self.b / (2 * self.a))
-        else:
-            self.stable_q_min = 0.0
+        # Ajustes polinómicos grado 3
+        self.popt_h, _ = curve_fit(poly3, q_raw, h_raw)
+        self.popt_eta, _ = curve_fit(poly3, q_raw, eta_raw)
+        self.popt_npsh, _ = curve_fit(poly3, q_raw, npsh_raw)
+        self.popt_p2, _ = curve_fit(poly3, q_raw, p2_raw)
 
-        unique_q, unique_idx = np.unique(q_raw, return_index=True)
-        self.unique_q = unique_q
-        self.eta_values = eta_raw[unique_idx]
-        self.npsh_values = npsh_raw[unique_idx]
+        self.q_min = float(np.min(q_raw))
+        self.q_max = float(np.max(q_raw))
 
-        self.interp_eta = PchipInterpolator(self.unique_q, self.eta_values)
-        self.interp_npsh = PchipInterpolator(self.unique_q, self.npsh_values)
+        # Derivada de H(Q) para detectar quiebre de estabilidad
+        deriv_coeffs = np.polyder(self.popt_h)
+        real_roots = []
+        for r in np.roots(deriv_coeffs):
+            if abs(r.imag) < 1e-8 and self.q_min <= r.real <= self.q_max:
+                real_roots.append(float(r.real))
 
-        self.q_min = float(np.min(self.unique_q))
-        self.q_max = float(np.max(self.unique_q))
+        self.stable_q_min = max(0.0, min(real_roots)) if real_roots else 0.0
 
         qq = np.linspace(max(0.1, self.q_min), self.q_max, 240)
-        ee = self.interp_eta(qq)
+        ee = np.array([self.get_eta(q) for q in qq])
         idx_bep = int(np.argmax(ee))
         self.q_bep = float(qq[idx_bep])
         self.eta_bep = float(ee[idx_bep])
 
     def get_h(self, q: float) -> float:
-        return float(poly2(np.array([q]), *self.popt_h)[0])
+        q_eval = float(np.clip(q, self.q_min, self.q_max))
+        return max(0.0, float(poly3(np.array([q_eval]), *self.popt_h)[0]))
 
     def get_eta(self, q: float) -> float:
-        q_eval = float(np.clip(q, self.unique_q[0], self.unique_q[-1]))
-        return float(self.interp_eta(q_eval))
+        q_eval = float(np.clip(q, self.q_min, self.q_max))
+        eta = float(poly3(np.array([q_eval]), *self.popt_eta)[0])
+        return min(100.0, max(0.0, eta))
 
     def get_npshr(self, q: float) -> float:
-        q_eval = float(np.clip(q, self.unique_q[0], self.unique_q[-1]))
-        return float(self.interp_npsh(q_eval))
+        q_eval = float(np.clip(q, self.q_min, self.q_max))
+        return max(0.0, float(poly3(np.array([q_eval]), *self.popt_npsh)[0]))
 
     def get_power(self, q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
-        h = self.get_h(q)
-        eta = max(0.01, self.get_eta(q) * viscosity_cf)
-        power_w = (q / 3600.0) * h * density * 9.81 / (eta / 100.0)
-        return float(power_w / 1000.0)
+        q_eval = float(np.clip(q, self.q_min, self.q_max))
+        p2_ref = max(0.0, float(poly3(np.array([q_eval]), *self.popt_p2)[0]))
+        return p2_ref * (density / 1000.0) / max(viscosity_cf, 0.01)
 
 
 class TrimmedCurve:
@@ -351,10 +355,8 @@ class TrimmedCurve:
         return self.base.get_npshr(q_base) * (self.ratio ** 2)
 
     def get_power(self, q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
-        h = self.get_h(q)
-        eta = max(0.01, self.get_eta(q) * viscosity_cf)
-        power_w = (q / 3600.0) * h * density * 9.81 / (eta / 100.0)
-        return float(power_w / 1000.0)
+        q_base = q / self.ratio
+        return (self.ratio ** 3) * self.base.get_power(q_base, density=density, viscosity_cf=viscosity_cf)
 
     def get_max_power(self, end_q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
         qq = np.linspace(max(0.1, 0.02 * end_q), max(end_q, 0.1), 120)
@@ -428,7 +430,8 @@ class PumpDatabase:
                     if not np.isnan(q) and not np.isnan(h):
                         puntos.append({"Q": q, "H": h, "eta": eta, "NPSH": npsh})
 
-                if len(puntos) >= 3:
+                # Un polinomio cúbico requiere al menos 4 puntos
+                if len(puntos) >= 4:
                     try:
                         curvas.append(PumpCurveBase(d, puntos))
                     except Exception:
