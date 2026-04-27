@@ -16,7 +16,7 @@ from scipy.optimize import brentq, curve_fit
 # ==============================
 NPSH_MARGIN_M = 0.5
 VALID_USERNAME = "Diego"
-VALID_PASSWORD = "Vog1234"
+VALID_PASSWORD = "Vogt1234"
 APP_SUBTITLE = "Series N-NP-N(V)"
 APP_TITLE = "Seleccionador Bombas Normalizadas"
 
