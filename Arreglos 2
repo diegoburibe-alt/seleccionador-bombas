@@ -29,3 +29,26 @@ El valor de P2 mostrarlo en kW como ahoraa y en HP
 En selección de bomba manual actualmente no se puede seleccionar una bomba para cambiar los graficos mostrados, haz que cuando se aprete el modelo que se quiere ver automaticamente muestre esas curvas
 En los graficos de seleccion manual de bombas, quiero que uno cuando pase el mouse por arriba de las curvas que se muestran y aprete en algun punto, nos de los valores en ese punto (que lo marque en rojo en todos los graficos, y que abajo de los graficos muestre los valores)
 Grundfos: Potencia: Polinomica grado 3, R2 99,9%. Wilo
+
+Este codigo esta creado a partir de la base de datos que te adjunté, cusa esto como base e implementa los siguientes cambios:
+Las curvas mostradas en la seleccion manual de bombas, deben ser directamente graficadas desde la base de datos (los diámetros existentes en la base de datos los otros deben ser calculados a partir de leyes de afinidad, como  lo hace el codgio)
+En seleccion manual poder seleccionar de la tabla con todos los modelos, la bomba del que uno quiere visualizar los gráficos 
+volver a este calculo de las variables para seleccion por punto:     def get_h(self, q: float) -> float:
+        return float(poly2(np.array([q]), *self.popt_h)[0])
+
+    def get_eta(self, q: float) -> float:
+        q_eval = float(np.clip(q, self.unique_q[0], self.unique_q[-1]))
+        return float(self.interp_eta(q_eval))
+
+    def get_npshr(self, q: float) -> float:
+        q_eval = float(np.clip(q, self.unique_q[0], self.unique_q[-1]))
+        return float(self.interp_npsh(q_eval))
+
+    def get_power(self, q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
+        h = self.get_h(q)
+        eta = max(0.01, self.get_eta(q) * viscosity_cf)
+        power_w = (q / 3600.0) * h * density * 9.81 / (eta / 100.0)
+        return float(power_w / 1000.0)
+
+Excepto potencia, que sea con polinomio grado 2
+
