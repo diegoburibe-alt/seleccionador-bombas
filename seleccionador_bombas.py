@@ -278,7 +278,7 @@ def discharge_from_model(modelo: str) -> Optional[int]:
 
 
 class PumpCurveBase:
-    def __init__(self, diam: float, puntos: List[Dict[str, float]]) -> None:
+    def __init__(self, diam: float, puntos: List[Dict[str, float]], q_max_override: Optional[float] = None) -> None:
         self.diam = float(diam)
         self.puntos = sorted(puntos, key=lambda p: p["Q"])
 
@@ -305,7 +305,11 @@ class PumpCurveBase:
         self.interp_npsh = PchipInterpolator(self.unique_q, self.npsh_values)
 
         self.q_min = float(np.min(self.unique_q))
-        self.q_max = float(np.max(self.unique_q))
+        q_max_calculado = float(np.max(self.unique_q))
+        if q_max_override is not None and not pd.isna(q_max_override) and float(q_max_override) > 0:
+            self.q_max = float(q_max_override)
+        else:
+            self.q_max = q_max_calculado
 
         valid_p_mask = ~np.isnan(p_raw)
         self.has_power_poly = bool(np.sum(valid_p_mask) >= 3)
@@ -342,6 +346,8 @@ class TrimmedCurve:
         self.base = base_curve
         self.diam = float(trim_diam)
         self.ratio = self.diam / self.base.diam
+        self.q_min = self.base.q_min * self.ratio
+        self.q_max = self.base.q_max * self.ratio
 
     def get_h(self, q: float) -> float:
         q_base = q / self.ratio
@@ -429,6 +435,17 @@ class PumpDatabase:
         series_col = "Serie" if "Serie" in df.columns else None
         has_rpm = "RPM" in df.columns
         has_pot_kw = "pot_kw" in df.columns
+        qmax_col = None
+        qmax_col_candidates = [
+            "Qmax_m3/h", "Q_max_m3/h", "Qmáx_m3/h", "Q_máx_m3/h",
+            "Qmax", "Q_max", "Q máx", "Q max", "qmax", "q_max",
+        ]
+        normalized_cols = {str(col).strip().lower(): col for col in df.columns}
+        for candidate in qmax_col_candidates:
+            key = candidate.strip().lower()
+            if key in normalized_cols:
+                qmax_col = normalized_cols[key]
+                break
 
         groupby_cols = []
         if series_col:
@@ -463,6 +480,13 @@ class PumpDatabase:
                 group_d = group[group["diametro_mm"].astype(float) == d]
                 puntos: List[Dict[str, float]] = []
 
+                q_max_override = None
+                if qmax_col is not None:
+                    qmax_values = [safe_float(v, np.nan) for v in group_d[qmax_col].tolist()]
+                    qmax_values = [v for v in qmax_values if not np.isnan(v) and v > 0]
+                    if qmax_values:
+                        q_max_override = max(qmax_values)
+
                 for _, row in group_d.iterrows():
                     q = safe_float(row["Q_m3/h"])
                     h = safe_float(row["H_m"])
@@ -474,7 +498,7 @@ class PumpDatabase:
 
                 if len(puntos) >= 3:
                     try:
-                        curvas.append(PumpCurveBase(d, puntos))
+                        curvas.append(PumpCurveBase(d, puntos, q_max_override=q_max_override))
                     except Exception:
                         continue
 
@@ -506,6 +530,18 @@ class PumpDatabase:
 # ==============================
 # Cálculo hidráulico
 # ==============================
+def get_curve_q_max(curve_obj) -> Optional[float]:
+    if curve_obj is None:
+        return None
+    if hasattr(curve_obj, "q_max"):
+        q_max = safe_float(getattr(curve_obj, "q_max"), np.nan)
+        return None if np.isnan(q_max) else float(q_max)
+    if hasattr(curve_obj, "base") and hasattr(curve_obj, "ratio"):
+        q_max = safe_float(curve_obj.base.q_max, np.nan) * safe_float(curve_obj.ratio, np.nan)
+        return None if np.isnan(q_max) else float(q_max)
+    return None
+
+
 def find_trim_diameter(
     q_req: float,
     h_req: float,
@@ -553,10 +589,29 @@ def find_interpolated_diameter_curve(
     curvas = sorted(fam["curvas"], key=lambda c: c.diam)
 
     for curve in curvas:
+        q_max_curve = get_curve_q_max(curve)
+        if q_max_curve is not None and q_req > q_max_curve:
+            continue
+
         if abs(curve.get_h(q_req) - h_req) < 1e-8:
             return float(curve.diam), curve, curve, curve
 
     for curve_low, curve_high in zip(curvas[:-1], curvas[1:]):
+        q_max_low = get_curve_q_max(curve_low)
+        q_max_high = get_curve_q_max(curve_high)
+
+        if q_max_low is not None and q_max_high is not None:
+            q_max_pair = min(q_max_low, q_max_high)
+        elif q_max_low is not None:
+            q_max_pair = q_max_low
+        elif q_max_high is not None:
+            q_max_pair = q_max_high
+        else:
+            q_max_pair = None
+
+        if q_max_pair is not None and q_req > q_max_pair:
+            continue
+
         h_low = float(curve_low.get_h(q_req))
         h_high = float(curve_high.get_h(q_req))
         h_min = min(h_low, h_high)
@@ -1304,6 +1359,10 @@ def evaluate_families(
     for fam in families:
         d_req, interp_curve, curve_low, curve_high = find_interpolated_diameter_curve(fam, q_req, h_req)
         if d_req is None or interp_curve is None:
+            continue
+
+        q_max_curve = get_curve_q_max(interp_curve)
+        if q_max_curve is not None and q_req > q_max_curve:
             continue
 
         if not (fam["D_min"] <= d_req <= fam["D_max"]):
