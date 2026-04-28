@@ -374,7 +374,13 @@ class TrimmedCurve:
 
 
 class InterpolatedDiameterCurve:
-    def __init__(self, curve_low: PumpCurveBase, curve_high: PumpCurveBase, interp_diam: float) -> None:
+    def __init__(
+        self,
+        curve_low: PumpCurveBase,
+        curve_high: PumpCurveBase,
+        interp_diam: float,
+        q_max_est: Optional[float] = None,
+    ) -> None:
         if curve_high.diam <= curve_low.diam:
             raise ValueError("Los diámetros vecinos deben estar ordenados de menor a mayor.")
         self.curve_low = curve_low
@@ -384,7 +390,11 @@ class InterpolatedDiameterCurve:
         self.d2 = float(curve_high.diam)
         self.lam = (self.diam - self.d1) / (self.d2 - self.d1)
         self.q_min = max(curve_low.q_min, curve_high.q_min)
-        self.q_max = blend_q_limit(curve_low.q_max, curve_high.q_max, self.lam)
+
+        if q_max_est is not None and not pd.isna(q_max_est) and float(q_max_est) > 0:
+            self.q_max = float(q_max_est)
+        else:
+            self.q_max = blend_q_limit(curve_low.q_max, curve_high.q_max, self.lam)
 
     def _blend(self, y1: float, y2: float) -> float:
         return float((1.0 - self.lam) * y1 + self.lam * y2)
@@ -552,6 +562,21 @@ def blend_q_limit(q_low: Optional[float], q_high: Optional[float], lam: float) -
     return float((1.0 - lam) * q_low + lam * q_high)
 
 
+def qmax_por_afinidad_desde_diametro_maximo(fam: Dict, d_req: float) -> Optional[float]:
+    curvas = sorted(fam["curvas"], key=lambda c: c.diam)
+    if not curvas:
+        return None
+
+    curva_dmax = curvas[-1]
+    d_max = safe_float(curva_dmax.diam, np.nan)
+    q_max_dmax = get_curve_q_max(curva_dmax)
+
+    if q_max_dmax is None or np.isnan(d_max) or d_max <= 0:
+        return q_max_dmax
+
+    return float(q_max_dmax * (float(d_req) / d_max))
+
+
 def find_trim_diameter(
     q_req: float,
     h_req: float,
@@ -619,9 +644,7 @@ def find_interpolated_diameter_curve(
             lam = (h_req - h_low) / (h_high - h_low)
             d_req = float(curve_low.diam + lam * (curve_high.diam - curve_low.diam))
 
-            q_max_low = get_curve_q_max(curve_low)
-            q_max_high = get_curve_q_max(curve_high)
-            q_max_interp = blend_q_limit(q_max_low, q_max_high, lam)
+            q_max_interp = qmax_por_afinidad_desde_diametro_maximo(fam, d_req)
             if q_max_interp is not None and q_req > q_max_interp:
                 continue
 
@@ -630,7 +653,12 @@ def find_interpolated_diameter_curve(
             if abs(d_req - curve_high.diam) < 1e-8:
                 return float(curve_high.diam), curve_high, curve_high, curve_high
 
-            interp_curve = InterpolatedDiameterCurve(curve_low, curve_high, d_req)
+            interp_curve = InterpolatedDiameterCurve(
+                curve_low,
+                curve_high,
+                d_req,
+                q_max_est=q_max_interp,
+            )
             return d_req, interp_curve, curve_low, curve_high
 
     return None, None, None, None
