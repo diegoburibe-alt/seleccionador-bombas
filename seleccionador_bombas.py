@@ -734,15 +734,15 @@ def render_top_header() -> None:
             logo_uri = image_to_data_uri(logo_path)
             st.markdown(
                 f"""
-                <div style="display:flex; align-items:center; justify-content:flex-start; height:165px;">
-                    <img src="{logo_uri}" style="max-height:155px; width:auto;">
-                </div>
+                <a href="?go_menu=1" target="_self" style="display:flex; align-items:center; justify-content:flex-start; height:165px; text-decoration:none;">
+                    <img src="{logo_uri}" style="max-height:155px; width:auto; cursor:pointer;">
+                </a>
                 """,
                 unsafe_allow_html=True,
             )
         else:
             st.markdown(
-                "<div style='font-size:4.4rem; font-weight:900; color:#0059aa;'>VOGT</div>",
+                "<a href='?go_menu=1' target='_self' style='font-size:4.4rem; font-weight:900; color:#0059aa; text-decoration:none; cursor:pointer;'>VOGT</a>",
                 unsafe_allow_html=True,
             )
 
@@ -758,6 +758,25 @@ def render_top_header() -> None:
             """,
             unsafe_allow_html=True,
         )
+
+
+def handle_logo_home_navigation() -> None:
+    try:
+        go_menu = st.query_params.get("go_menu", None)
+    except Exception:
+        go_menu = None
+
+    if go_menu is not None:
+        if st.session_state.get("authenticated", False):
+            st.session_state.page = "menu"
+        try:
+            del st.query_params["go_menu"]
+        except Exception:
+            try:
+                st.query_params.clear()
+            except Exception:
+                pass
+        st.rerun()
 
 
 def go_to(page_name: str) -> None:
@@ -1419,11 +1438,90 @@ def render_curve_data_download(fam: Dict, key: str) -> None:
     if curve_data.empty:
         return
 
-    csv_data = curve_data.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig")
+    csv_data = curve_data.to_csv(index=False, sep=";", decimal=".").encode("utf-8-sig")
     file_name = f"datos_curva_{sanitize_filename(fam['serie_display'])}_{sanitize_filename(fam['modelo'])}.csv"
 
     st.download_button(
         label="Descargar datos de la curva del modelo",
+        data=csv_data,
+        file_name=file_name,
+        mime="text/csv",
+        key=key,
+        use_container_width=True,
+    )
+
+
+def selected_diameter_curve_data_df(
+    fam: Dict,
+    curve_obj,
+    selected_diam: Optional[float],
+    density: float = 1000.0,
+    visco_cf: float = 1.0,
+    n_points: int = 420,
+) -> pd.DataFrame:
+    if curve_obj is None:
+        return pd.DataFrame()
+
+    q_min = float(getattr(curve_obj, "q_min", 0.0))
+    q_max = float(getattr(curve_obj, "q_max", q_min))
+
+    if q_max <= q_min:
+        q_values = np.array([q_min], dtype=float)
+    else:
+        q_values = np.linspace(q_min, q_max, n_points)
+
+    diam = float(selected_diam) if selected_diam is not None and not pd.isna(selected_diam) else float(getattr(curve_obj, "diam", np.nan))
+
+    rows = []
+    for q in q_values:
+        q_float = float(q)
+        rows.append(
+            {
+                "Serie": fam["serie_display"],
+                "Marca": fam["marca"],
+                "Modelo": fam["modelo"],
+                "RPM": fam["rpm"],
+                "Polos": fam["polos"],
+                "Diametro_mm": diam,
+                "Q_m3/h": q_float,
+                "H_m": curve_obj.get_h(q_float),
+                "pot_kw": curve_obj.get_power(q_float, density=density, viscosity_cf=visco_cf),
+                "h_%": curve_obj.get_eta(q_float) * visco_cf,
+                "NPSH_m": curve_obj.get_npshr(q_float),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def render_selected_diameter_data_download(
+    fam: Dict,
+    curve_obj,
+    selected_diam: Optional[float],
+    key: str,
+    density: float = 1000.0,
+    visco_cf: float = 1.0,
+) -> None:
+    curve_data = selected_diameter_curve_data_df(
+        fam=fam,
+        curve_obj=curve_obj,
+        selected_diam=selected_diam,
+        density=density,
+        visco_cf=visco_cf,
+    )
+    if curve_data.empty:
+        return
+
+    diam_value = curve_data["Diametro_mm"].iloc[0]
+    diam_txt = f"{float(diam_value):.2f}".rstrip("0").rstrip(".")
+    csv_data = curve_data.to_csv(index=False, sep=";", decimal=".").encode("utf-8-sig")
+    file_name = (
+        f"datos_curva_{sanitize_filename(fam['serie_display'])}_"
+        f"{sanitize_filename(fam['modelo'])}_D{sanitize_filename(diam_txt)}mm.csv"
+    )
+
+    st.download_button(
+        label="Descargar datos del diámetro seleccionado",
         data=csv_data,
         file_name=file_name,
         mime="text/csv",
@@ -1625,10 +1723,22 @@ def hydraulic_selection_view(families: List[Dict]) -> None:
     )
     detail_cols[4].metric("NPSH", "OK" if selected["Status NPSH"] else "Revisar")
 
-    render_curve_data_download(
-        fam=fam,
-        key=f"download_hydraulic_{sanitize_filename(selected['Serie'])}_{sanitize_filename(selected['Modelo'])}_{selected_idx}",
-    )
+    selected_diam_exact = float(getattr(trim_curve, "diam", selected["D_Impulsor (mm)"]))
+    download_cols = st.columns(2)
+    with download_cols[0]:
+        render_curve_data_download(
+            fam=fam,
+            key=f"download_hydraulic_{sanitize_filename(selected['Serie'])}_{sanitize_filename(selected['Modelo'])}_{selected_idx}",
+        )
+    with download_cols[1]:
+        render_selected_diameter_data_download(
+            fam=fam,
+            curve_obj=trim_curve,
+            selected_diam=selected_diam_exact,
+            density=densidad,
+            visco_cf=selected["_visco_cf"],
+            key=f"download_hydraulic_diam_{sanitize_filename(selected['Serie'])}_{sanitize_filename(selected['Modelo'])}_{selected_idx}",
+        )
 
     values_at_point = {
         "H": float(selected["H Op. (m)"]),
@@ -1847,10 +1957,22 @@ def manual_selection_view(families: List[Dict]) -> None:
         kpi_cols[4].metric("D mín. (mm)", fmt0(selected_row["D mín. (mm)"]))
         kpi_cols[5].metric("D máx. (mm)", fmt0(selected_row["D máx. (mm)"]))
 
-        render_curve_data_download(
-            fam=fam,
-            key=f"download_manual_{sanitize_filename(str(selected_row['Serie']))}_{sanitize_filename(str(selected_row['Modelo']))}_{selection_index}",
-        )
+        download_cols = st.columns(2)
+        with download_cols[0]:
+            render_curve_data_download(
+                fam=fam,
+                key=f"download_manual_{sanitize_filename(str(selected_row['Serie']))}_{sanitize_filename(str(selected_row['Modelo']))}_{selection_index}",
+            )
+        if selected_curve_obj is not None:
+            with download_cols[1]:
+                render_selected_diameter_data_download(
+                    fam=fam,
+                    curve_obj=selected_curve_obj,
+                    selected_diam=selected_real_diam,
+                    density=1000.0,
+                    visco_cf=1.0,
+                    key=f"download_manual_diam_{sanitize_filename(str(selected_row['Serie']))}_{sanitize_filename(str(selected_row['Modelo']))}_{selection_index}",
+                )
 
         render_manual_interactive_curves(
             fam=fam,
@@ -1892,6 +2014,8 @@ def render_work_page_header() -> None:
 # App principal
 # ==============================
 def app() -> None:
+    handle_logo_home_navigation()
+
     if not st.session_state.authenticated:
         login_view()
         return
