@@ -14,3 +14,8 @@ Luego que diga menu principal y nos de dos opciones, la primera: Selección de B
 Luego la opcion de Seleccion de Bombas Manual y que salga la Lista completa de todos los modelos, Serie(Marca), polos, Que se pueda filtrar por diametro de descarga (numero antes del guion), por numero de polos, serie, etc y que al ingresar salga la curva con los diametros que estan en la base de datos, mostrando todos los gráficos
 
 El Q solicitado debe ser menor o igual que el Q max de la bomba, actualmente por ejemplo al pedir el punto Q = 100 y H = 57, me da que el modelo N 40-250 da ese punto, pero el punto se gráfica fuera de la curva, ya que la curva llega a Q = 65 aprox, analisa este codigo y dime si está está condicion, ademas debe estar la de H solicitada menor o iguak que la hmax, dime si estan estas condiciones
+
+
+Ya no tener que subir base de datos, que el codigo trabaje directamente con "Base_Datos_wilo_sempa_grundfos.csv"
+
+Que la bomba que visualicemos las curvas, en algun lado nos de la opcion de descargar los datos con los que se armó la curva de ese modelo
