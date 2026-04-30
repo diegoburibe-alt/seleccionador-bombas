@@ -738,7 +738,7 @@ def render_top_header() -> None:
                     <style>
                         .st-key-logo_home_btn button {{
                             background-image: url("{logo_uri}");
-                            background-size: contain;
+                            background-size: auto 155px;
                             background-repeat: no-repeat;
                             background-position: left center;
                             height: 165px;
