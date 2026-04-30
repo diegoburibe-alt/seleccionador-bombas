@@ -732,71 +732,19 @@ def render_top_header() -> None:
     with col_logo:
         if logo_path:
             logo_uri = image_to_data_uri(logo_path)
-            if st.session_state.get("authenticated", False):
-                st.markdown(
-                    f"""
-                    <style>
-                        .st-key-logo_home_btn button {{
-                            background-image: url("{logo_uri}");
-                            background-size: auto 155px;
-                            background-repeat: no-repeat;
-                            background-position: left center;
-                            height: 165px;
-                            min-height: 165px;
-                            width: 100%;
-                            border: 0 !important;
-                            background-color: transparent !important;
-                            color: transparent !important;
-                            box-shadow: none !important;
-                            padding: 0 !important;
-                        }}
-
-                        .st-key-logo_home_btn button:hover {{
-                            background-color: transparent !important;
-                            border: 0 !important;
-                            box-shadow: none !important;
-                            cursor: pointer;
-                            opacity: 0.85;
-                        }}
-
-                        .st-key-logo_home_btn button:focus {{
-                            background-color: transparent !important;
-                            border: 0 !important;
-                            box-shadow: none !important;
-                        }}
-
-                        .st-key-logo_home_btn button p {{
-                            color: transparent !important;
-                        }}
-                    </style>
-                    """,
-                    unsafe_allow_html=True,
-                )
-                if st.button(
-                    "VOGT",
-                    key="logo_home_btn",
-                    use_container_width=True,
-                    help="Volver al menú principal",
-                ):
-                    go_to("menu")
-            else:
-                st.markdown(
-                    f"""
-                    <div style="display:flex; align-items:center; justify-content:flex-start; height:165px;">
-                        <img src="{logo_uri}" style="max-height:155px; width:auto;">
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+            st.markdown(
+                f"""
+                <a href="?go_menu=1" target="_self" style="display:flex; align-items:center; justify-content:flex-start; height:165px; text-decoration:none;">
+                    <img src="{logo_uri}" style="max-height:155px; width:auto; cursor:pointer;">
+                </a>
+                """,
+                unsafe_allow_html=True,
+            )
         else:
-            if st.session_state.get("authenticated", False):
-                if st.button("VOGT", key="logo_home_btn_text", use_container_width=True):
-                    go_to("menu")
-            else:
-                st.markdown(
-                    "<div style='font-size:4.4rem; font-weight:900; color:#0059aa;'>VOGT</div>",
-                    unsafe_allow_html=True,
-                )
+            st.markdown(
+                "<a href='?go_menu=1' target='_self' style='font-size:4.4rem; font-weight:900; color:#0059aa; text-decoration:none; cursor:pointer;'>VOGT</a>",
+                unsafe_allow_html=True,
+            )
 
     with col_title:
         st.markdown(
@@ -810,6 +758,25 @@ def render_top_header() -> None:
             """,
             unsafe_allow_html=True,
         )
+
+
+def handle_logo_home_navigation() -> None:
+    try:
+        go_menu = st.query_params.get("go_menu", None)
+    except Exception:
+        go_menu = None
+
+    if go_menu is not None:
+        if st.session_state.get("authenticated", False):
+            st.session_state.page = "menu"
+        try:
+            del st.query_params["go_menu"]
+        except Exception:
+            try:
+                st.query_params.clear()
+            except Exception:
+                pass
+        st.rerun()
 
 
 def go_to(page_name: str) -> None:
@@ -2047,6 +2014,8 @@ def render_work_page_header() -> None:
 # App principal
 # ==============================
 def app() -> None:
+    handle_logo_home_navigation()
+
     if not st.session_state.authenticated:
         login_view()
         return
