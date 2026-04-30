@@ -400,64 +400,41 @@ class InterpolatedDiameterCurve:
     def _blend(self, y1: float, y2: float) -> float:
         return float((1.0 - self.lam) * y1 + self.lam * y2)
 
-    def _tail_equation_value(self, curve: PumpCurveBase, q: float, metric: str) -> float:
-        q_data = np.array(curve.unique_q, dtype=float)
-        q_end = float(q_data[-1])
+    def _curve_low_eta_with_tail_similarity(self, q: float) -> float:
+        q_low_max = float(self.curve_low.unique_q[-1])
+        if q <= q_low_max:
+            return self.curve_low.get_eta(q)
 
-        if metric == "ETA":
-            if q <= q_end:
-                return curve.get_eta(q)
-            y_data = np.array(curve.eta_values, dtype=float)
-            y_end = float(curve.get_eta(q_end))
-        elif metric == "NPSH":
-            if q <= q_end:
-                return curve.get_npshr(q)
-            y_data = np.array(curve.npsh_values, dtype=float)
-            y_end = float(curve.get_npshr(q_end))
-        else:
-            return 0.0
+        ratio_low_high = self.d1 / self.d2
+        q_ref = q / ratio_low_high
+        q_ref = min(q_ref, float(self.curve_high.unique_q[-1]))
+        eta_est = self.curve_high.get_eta(q_ref)
+        return float(max(0.0, min(100.0, eta_est)))
 
-        n_tail = min(10, len(q_data))
-        if n_tail < 2:
-            return y_end
+    def _curve_low_npsh_with_tail_similarity(self, q: float) -> float:
+        q_low_max = float(self.curve_low.unique_q[-1])
+        if q <= q_low_max:
+            return self.curve_low.get_npshr(q)
 
-        x_tail = q_data[-n_tail:] - q_end
-        y_tail = y_data[-n_tail:]
-        degree = 2 if n_tail >= 4 else 1
-
-        try:
-            coeffs = np.polyfit(x_tail, y_tail, degree)
-            x_eval = float(q) - q_end
-            y_poly = float(np.polyval(coeffs, x_eval))
-            y_poly_at_end = float(np.polyval(coeffs, 0.0))
-            y_est = y_end + (y_poly - y_poly_at_end)
-        except Exception:
-            y_est = y_end
-
-        if metric == "ETA":
-            return float(max(0.0, min(100.0, y_est)))
-
-        if metric == "NPSH":
-            return float(max(0.0, y_est))
-
-        return float(y_est)
+        ratio_low_high = self.d1 / self.d2
+        q_ref = q / ratio_low_high
+        q_ref = min(q_ref, float(self.curve_high.unique_q[-1]))
+        npsh_est = self.curve_high.get_npshr(q_ref) * (ratio_low_high ** 2)
+        npsh_last = self.curve_low.get_npshr(q_low_max)
+        return float(max(npsh_last, npsh_est))
 
     def get_h(self, q: float) -> float:
         return self._blend(self.curve_low.get_h(q), self.curve_high.get_h(q))
 
     def get_eta(self, q: float) -> float:
-        if q > float(self.curve_low.unique_q[-1]):
-            eta_low = self._tail_equation_value(self.curve_low, q, "ETA")
-        else:
-            eta_low = self.curve_low.get_eta(q)
-        return self._blend(eta_low, self.curve_high.get_eta(q))
+        eta_low = self._curve_low_eta_with_tail_similarity(q)
+        eta_high = self.curve_high.get_eta(q)
+        return self._blend(eta_low, eta_high)
 
     def get_npshr(self, q: float) -> float:
-        if q > float(self.curve_low.unique_q[-1]):
-            npsh_low = self._tail_equation_value(self.curve_low, q, "NPSH")
-        else:
-            npsh_low = self.curve_low.get_npshr(q)
-        return self._blend(npsh_low, self.curve_high.get_npshr(q))
+        npsh_low = self._curve_low_npsh_with_tail_similarity(q)
+        npsh_high = self.curve_high.get_npshr(q)
+        return self._blend(npsh_low, npsh_high)
 
     def get_power(self, q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
         return self._blend(
@@ -1482,6 +1459,88 @@ def render_curve_data_download(fam: Dict, key: str) -> None:
     )
 
 
+def selected_diameter_curve_data_df(
+    fam: Dict,
+    curve_obj,
+    selected_diam: Optional[float],
+    density: float = 1000.0,
+    visco_cf: float = 1.0,
+    n_points: int = 420,
+) -> pd.DataFrame:
+    if curve_obj is None:
+        return pd.DataFrame()
+
+    q_min = float(getattr(curve_obj, "q_min", 0.0))
+    q_max = float(getattr(curve_obj, "q_max", q_min))
+
+    if q_max <= q_min:
+        q_values = np.array([q_min], dtype=float)
+    else:
+        q_values = np.linspace(q_min, q_max, n_points)
+
+    if selected_diam is not None and not pd.isna(selected_diam):
+        diam = float(selected_diam)
+    else:
+        diam = float(getattr(curve_obj, "diam", np.nan))
+
+    rows = []
+    for q in q_values:
+        q_float = float(q)
+        rows.append(
+            {
+                "Serie": fam["serie_display"],
+                "Marca": fam["marca"],
+                "Modelo": fam["modelo"],
+                "RPM": fam["rpm"],
+                "Polos": fam["polos"],
+                "Diametro_mm": diam,
+                "Q_m3/h": q_float,
+                "H_m": curve_obj.get_h(q_float),
+                "pot_kw": curve_obj.get_power(q_float, density=density, viscosity_cf=visco_cf),
+                "h_%": curve_obj.get_eta(q_float) * visco_cf,
+                "NPSH_m": curve_obj.get_npshr(q_float),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def render_selected_diameter_data_download(
+    fam: Dict,
+    curve_obj,
+    selected_diam: Optional[float],
+    key: str,
+    density: float = 1000.0,
+    visco_cf: float = 1.0,
+) -> None:
+    curve_data = selected_diameter_curve_data_df(
+        fam=fam,
+        curve_obj=curve_obj,
+        selected_diam=selected_diam,
+        density=density,
+        visco_cf=visco_cf,
+    )
+    if curve_data.empty:
+        return
+
+    diam_value = curve_data["Diametro_mm"].iloc[0]
+    diam_txt = f"{float(diam_value):.2f}".rstrip("0").rstrip(".")
+    csv_data = curve_data.to_csv(index=False, sep=";", decimal=".").encode("utf-8-sig")
+    file_name = (
+        f"datos_curva_{sanitize_filename(fam['serie_display'])}_"
+        f"{sanitize_filename(fam['modelo'])}_D{sanitize_filename(diam_txt)}mm.csv"
+    )
+
+    st.download_button(
+        label="Descargar datos del diámetro seleccionado",
+        data=csv_data,
+        file_name=file_name,
+        mime="text/csv",
+        key=key,
+        use_container_width=True,
+    )
+
+
 # ==============================
 # Vista selección por punto
 # ==============================
@@ -1675,10 +1734,22 @@ def hydraulic_selection_view(families: List[Dict]) -> None:
     )
     detail_cols[4].metric("NPSH", "OK" if selected["Status NPSH"] else "Revisar")
 
-    render_curve_data_download(
-        fam=fam,
-        key=f"download_hydraulic_{sanitize_filename(selected['Serie'])}_{sanitize_filename(selected['Modelo'])}_{selected_idx}",
-    )
+    selected_diam_exact = float(getattr(trim_curve, "diam", selected["D_Impulsor (mm)"]))
+    download_cols = st.columns(2)
+    with download_cols[0]:
+        render_curve_data_download(
+            fam=fam,
+            key=f"download_hydraulic_{sanitize_filename(selected['Serie'])}_{sanitize_filename(selected['Modelo'])}_{selected_idx}",
+        )
+    with download_cols[1]:
+        render_selected_diameter_data_download(
+            fam=fam,
+            curve_obj=trim_curve,
+            selected_diam=selected_diam_exact,
+            density=densidad,
+            visco_cf=selected["_visco_cf"],
+            key=f"download_hydraulic_diam_{sanitize_filename(selected['Serie'])}_{sanitize_filename(selected['Modelo'])}_{selected_idx}",
+        )
 
     values_at_point = {
         "H": float(selected["H Op. (m)"]),
@@ -1897,10 +1968,22 @@ def manual_selection_view(families: List[Dict]) -> None:
         kpi_cols[4].metric("D mín. (mm)", fmt0(selected_row["D mín. (mm)"]))
         kpi_cols[5].metric("D máx. (mm)", fmt0(selected_row["D máx. (mm)"]))
 
-        render_curve_data_download(
-            fam=fam,
-            key=f"download_manual_{sanitize_filename(str(selected_row['Serie']))}_{sanitize_filename(str(selected_row['Modelo']))}_{selection_index}",
-        )
+        download_cols = st.columns(2)
+        with download_cols[0]:
+            render_curve_data_download(
+                fam=fam,
+                key=f"download_manual_{sanitize_filename(str(selected_row['Serie']))}_{sanitize_filename(str(selected_row['Modelo']))}_{selection_index}",
+            )
+        if selected_curve_obj is not None:
+            with download_cols[1]:
+                render_selected_diameter_data_download(
+                    fam=fam,
+                    curve_obj=selected_curve_obj,
+                    selected_diam=selected_real_diam,
+                    density=1000.0,
+                    visco_cf=1.0,
+                    key=f"download_manual_diam_{sanitize_filename(str(selected_row['Serie']))}_{sanitize_filename(str(selected_row['Modelo']))}_{selection_index}",
+                )
 
         render_manual_interactive_curves(
             fam=fam,
