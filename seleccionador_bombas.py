@@ -19,6 +19,7 @@ VALID_USERNAME = "Diego"
 VALID_PASSWORD = "Vogt1234"
 APP_SUBTITLE = "Series N-NP-N(V)"
 APP_TITLE = "Seleccionador Bombas Normalizadas"
+BASE_DATABASE_FILENAME = "Base_Datos_wilo_sempa_grundfos.csv"
 
 IEC_MOTORS_KW = [
     0.18, 0.25, 0.37, 0.55, 0.75, 1.1, 1.5, 2.2, 3.0, 4.0, 5.5, 7.5,
@@ -854,28 +855,43 @@ def main_menu_view() -> None:
 # ==============================
 # Carga de base
 # ==============================
-def load_database_widget() -> Optional[List[Dict]]:
-    uploaded_file = st.sidebar.file_uploader("Cargar Base Oficial (CSV)", type=["csv"])
+def find_database_path() -> Optional[str]:
+    possible_paths = [
+        BASE_DATABASE_FILENAME,
+        os.path.join(os.getcwd(), BASE_DATABASE_FILENAME),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), BASE_DATABASE_FILENAME),
+        os.path.join("/mnt/data", BASE_DATABASE_FILENAME),
+    ]
 
-    if uploaded_file is not None:
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def load_database_widget() -> Optional[List[Dict]]:
+    if st.session_state.loaded_families is None:
+        db_path = find_database_path()
+
+        if db_path is None:
+            st.error(f"No se encontró la base de datos: {BASE_DATABASE_FILENAME}")
+            return None
+
         db = PumpDatabase()
         try:
-            db.load_from_csv(uploaded_file)
+            db.load_from_csv(db_path)
             st.session_state.loaded_families = db.get_families()
         except Exception as exc:
-            st.sidebar.error(f"Error de integridad en CSV: {exc}")
+            st.error(f"Error de integridad en CSV: {exc}")
             st.session_state.loaded_families = None
+            return None
 
     families = st.session_state.loaded_families
 
     if families is not None:
         st.sidebar.success(f"Base cargada: {len(families)} familias activas")
-        if st.sidebar.button("Quitar base cargada", use_container_width=True):
-            st.session_state.loaded_families = None
-            st.rerun()
         return families
 
-    st.info("Carga la base CSV para habilitar la selección.")
     return None
 
 
@@ -1367,6 +1383,55 @@ def family_curve_summary_table(fam: Dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def sanitize_filename(value: str) -> str:
+    name = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(value).strip())
+    return name.strip("_") or "modelo"
+
+
+def family_curve_raw_data_df(fam: Dict) -> pd.DataFrame:
+    rows = []
+    for curve in fam["curvas"]:
+        for point in curve.puntos:
+            rows.append(
+                {
+                    "Serie": fam["serie_display"],
+                    "Marca": fam["marca"],
+                    "Modelo": fam["modelo"],
+                    "RPM": fam["rpm"],
+                    "Polos": fam["polos"],
+                    "Diametro_mm": curve.diam,
+                    "Q_m3/h": point.get("Q", np.nan),
+                    "H_m": point.get("H", np.nan),
+                    "pot_kw": point.get("P", np.nan),
+                    "h_%": point.get("eta", np.nan),
+                    "NPSH_m": point.get("NPSH", np.nan),
+                }
+            )
+
+    if not rows:
+        return pd.DataFrame()
+
+    return pd.DataFrame(rows).sort_values(by=["Diametro_mm", "Q_m3/h"]).reset_index(drop=True)
+
+
+def render_curve_data_download(fam: Dict, key: str) -> None:
+    curve_data = family_curve_raw_data_df(fam)
+    if curve_data.empty:
+        return
+
+    csv_data = curve_data.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig")
+    file_name = f"datos_curva_{sanitize_filename(fam['serie_display'])}_{sanitize_filename(fam['modelo'])}.csv"
+
+    st.download_button(
+        label="Descargar datos de la curva del modelo",
+        data=csv_data,
+        file_name=file_name,
+        mime="text/csv",
+        key=key,
+        use_container_width=True,
+    )
+
+
 # ==============================
 # Vista selección por punto
 # ==============================
@@ -1559,6 +1624,11 @@ def hydraulic_selection_view(families: List[Dict]) -> None:
         f"Q={fmt1(selected['Q Op. (m3/h)'])} | H={fmt1(selected['H Op. (m)'])}"
     )
     detail_cols[4].metric("NPSH", "OK" if selected["Status NPSH"] else "Revisar")
+
+    render_curve_data_download(
+        fam=fam,
+        key=f"download_hydraulic_{sanitize_filename(selected['Serie'])}_{sanitize_filename(selected['Modelo'])}_{selected_idx}",
+    )
 
     values_at_point = {
         "H": float(selected["H Op. (m)"]),
@@ -1776,6 +1846,11 @@ def manual_selection_view(families: List[Dict]) -> None:
         kpi_cols[3].metric("RPM", fmt0(selected_row["RPM"]))
         kpi_cols[4].metric("D mín. (mm)", fmt0(selected_row["D mín. (mm)"]))
         kpi_cols[5].metric("D máx. (mm)", fmt0(selected_row["D máx. (mm)"]))
+
+        render_curve_data_download(
+            fam=fam,
+            key=f"download_manual_{sanitize_filename(str(selected_row['Serie']))}_{sanitize_filename(str(selected_row['Modelo']))}_{selection_index}",
+        )
 
         render_manual_interactive_curves(
             fam=fam,
