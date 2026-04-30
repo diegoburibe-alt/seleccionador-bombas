@@ -19,3 +19,7 @@ El Q solicitado debe ser menor o igual que el Q max de la bomba, actualmente por
 Ya no tener que subir base de datos, que el codigo trabaje directamente con "Base_Datos_wilo_sempa_grundfos.csv"
 
 Que la bomba que visualicemos las curvas, en algun lado nos de la opcion de descargar los datos con los que se armó la curva de ese modelo
+
+cuando descargo los datos de la curva del modelo, me lo descarga los numeros con coma y yo los tengo con puntos el separador decimal, arregla esto y enviame el codigo final terminado
+que el logo vogt sea un boton que nos lleve al boton principal
+Que ademas descargue los datos del diametro seleccionado ya sea en seleccion por punto ( el diametro que corresponda al punto) y la selección manual el diametro a mostrar, 
