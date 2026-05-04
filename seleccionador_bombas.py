@@ -15,11 +15,11 @@ from scipy.optimize import brentq, curve_fit
 # Configuración general
 # ==============================
 NPSH_MARGIN_M = 0.5
+WATER_DENSITY_KG_M3 = 998.0
 VALID_USERNAME = st.secrets["auth"]["username"]
 VALID_PASSWORD = st.secrets["auth"]["password"]
 APP_SUBTITLE = "Series N-NP-N(V)"
 APP_TITLE = "Seleccionador Bombas Normalizadas"
-BASE_DATABASE_FILENAME = "Base_Datos_wilo_sempa_grundfos.csv"
 
 IEC_MOTORS_KW = [
     0.18, 0.25, 0.37, 0.55, 0.75, 1.1, 1.5, 2.2, 3.0, 4.0, 5.5, 7.5,
@@ -336,9 +336,20 @@ class PumpCurveBase:
         q_eval = float(np.clip(q, self.unique_q[0], self.unique_q[-1]))
         return float(self.interp_npsh(q_eval))
 
-    def get_power(self, q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
+    def get_power(self, q: float, density: float = WATER_DENSITY_KG_M3, viscosity_cf: float = 1.0) -> float:
         if self.has_power_poly and self.popt_p is not None:
-            return max(0.0, float(poly2(np.array([q]), *self.popt_p)[0]))
+            p2_base_kw = max(0.0, float(poly2(np.array([q]), *self.popt_p)[0]))
+
+            density_value = safe_float(density, WATER_DENSITY_KG_M3)
+            if np.isnan(density_value) or density_value <= 0:
+                density_value = WATER_DENSITY_KG_M3
+
+            if abs(density_value - WATER_DENSITY_KG_M3) <= 1e-9:
+                return p2_base_kw
+
+            density_factor = density_value / WATER_DENSITY_KG_M3
+            return max(0.0, p2_base_kw * density_factor)
+
         return 0.0
 
 
@@ -362,11 +373,11 @@ class TrimmedCurve:
         q_base = q / self.ratio
         return self.base.get_npshr(q_base) * (self.ratio ** 2)
 
-    def get_power(self, q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
+    def get_power(self, q: float, density: float = WATER_DENSITY_KG_M3, viscosity_cf: float = 1.0) -> float:
         q_base = q / self.ratio
         return max(0.0, (self.ratio ** 3) * self.base.get_power(q_base, density=density, viscosity_cf=viscosity_cf))
 
-    def get_max_power(self, end_q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
+    def get_max_power(self, end_q: float, density: float = WATER_DENSITY_KG_M3, viscosity_cf: float = 1.0) -> float:
         qq = np.linspace(max(0.1, 0.02 * end_q), max(end_q, 0.1), 120)
         powers = [self.get_power(qi, density=density, viscosity_cf=viscosity_cf) for qi in qq]
         return float(max(powers)) if powers else 0.0
@@ -400,74 +411,22 @@ class InterpolatedDiameterCurve:
     def _blend(self, y1: float, y2: float) -> float:
         return float((1.0 - self.lam) * y1 + self.lam * y2)
 
-    def _tail_equation_value(self, curve: PumpCurveBase, q: float, metric: str) -> float:
-        q_data = np.array(curve.unique_q, dtype=float)
-        q_end = float(q_data[-1])
-
-        if metric == "ETA":
-            if q <= q_end:
-                return curve.get_eta(q)
-            y_data = np.array(curve.eta_values, dtype=float)
-            y_end = float(curve.get_eta(q_end))
-        elif metric == "NPSH":
-            if q <= q_end:
-                return curve.get_npshr(q)
-            y_data = np.array(curve.npsh_values, dtype=float)
-            y_end = float(curve.get_npshr(q_end))
-        else:
-            return 0.0
-
-        n_tail = min(10, len(q_data))
-        if n_tail < 2:
-            return y_end
-
-        x_tail = q_data[-n_tail:] - q_end
-        y_tail = y_data[-n_tail:]
-        degree = 2 if n_tail >= 4 else 1
-
-        try:
-            coeffs = np.polyfit(x_tail, y_tail, degree)
-            x_eval = float(q) - q_end
-            y_poly = float(np.polyval(coeffs, x_eval))
-            y_poly_at_end = float(np.polyval(coeffs, 0.0))
-            y_est = y_end + (y_poly - y_poly_at_end)
-        except Exception:
-            y_est = y_end
-
-        if metric == "ETA":
-            return float(max(0.0, min(100.0, y_est)))
-
-        if metric == "NPSH":
-            return float(max(0.0, y_est))
-
-        return float(y_est)
-
     def get_h(self, q: float) -> float:
         return self._blend(self.curve_low.get_h(q), self.curve_high.get_h(q))
 
     def get_eta(self, q: float) -> float:
-        if q > float(self.curve_low.unique_q[-1]):
-            eta_low = self._tail_equation_value(self.curve_low, q, "ETA")
-        else:
-            eta_low = self.curve_low.get_eta(q)
-        eta_high = self.curve_high.get_eta(q)
-        return self._blend(eta_low, eta_high)
+        return self._blend(self.curve_low.get_eta(q), self.curve_high.get_eta(q))
 
     def get_npshr(self, q: float) -> float:
-        if q > float(self.curve_low.unique_q[-1]):
-            npsh_low = self._tail_equation_value(self.curve_low, q, "NPSH")
-        else:
-            npsh_low = self.curve_low.get_npshr(q)
-        npsh_high = self.curve_high.get_npshr(q)
-        return self._blend(npsh_low, npsh_high)
+        return self._blend(self.curve_low.get_npshr(q), self.curve_high.get_npshr(q))
 
-    def get_power(self, q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
+    def get_power(self, q: float, density: float = WATER_DENSITY_KG_M3, viscosity_cf: float = 1.0) -> float:
         return self._blend(
             self.curve_low.get_power(q, density=density, viscosity_cf=viscosity_cf),
             self.curve_high.get_power(q, density=density, viscosity_cf=viscosity_cf),
         )
 
-    def get_max_power(self, end_q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
+    def get_max_power(self, end_q: float, density: float = WATER_DENSITY_KG_M3, viscosity_cf: float = 1.0) -> float:
         qq = np.linspace(max(0.1, self.q_min), max(end_q, 0.1), 120)
         powers = [self.get_power(qi, density=density, viscosity_cf=viscosity_cf) for qi in qq]
         return float(max(powers)) if powers else 0.0
@@ -907,43 +866,28 @@ def main_menu_view() -> None:
 # ==============================
 # Carga de base
 # ==============================
-def find_database_path() -> Optional[str]:
-    possible_paths = [
-        BASE_DATABASE_FILENAME,
-        os.path.join(os.getcwd(), BASE_DATABASE_FILENAME),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), BASE_DATABASE_FILENAME),
-        os.path.join("/mnt/data", BASE_DATABASE_FILENAME),
-    ]
-
-    for path in possible_paths:
-        if os.path.exists(path):
-            return path
-    return None
-
-
 def load_database_widget() -> Optional[List[Dict]]:
-    if st.session_state.loaded_families is None:
-        db_path = find_database_path()
+    uploaded_file = st.sidebar.file_uploader("Cargar Base Oficial (CSV)", type=["csv"])
 
-        if db_path is None:
-            st.error(f"No se encontró la base de datos: {BASE_DATABASE_FILENAME}")
-            return None
-
+    if uploaded_file is not None:
         db = PumpDatabase()
         try:
-            db.load_from_csv(db_path)
+            db.load_from_csv(uploaded_file)
             st.session_state.loaded_families = db.get_families()
         except Exception as exc:
-            st.error(f"Error de integridad en CSV: {exc}")
+            st.sidebar.error(f"Error de integridad en CSV: {exc}")
             st.session_state.loaded_families = None
-            return None
 
     families = st.session_state.loaded_families
 
     if families is not None:
         st.sidebar.success(f"Base cargada: {len(families)} familias activas")
+        if st.sidebar.button("Quitar base cargada", use_container_width=True):
+            st.session_state.loaded_families = None
+            st.rerun()
         return families
 
+    st.info("Carga la base CSV para habilitar la selección.")
     return None
 
 
@@ -985,7 +929,7 @@ def curve_values(
     curve_obj,
     metric: str,
     q_values: np.ndarray,
-    density: float = 1000.0,
+    density: float = WATER_DENSITY_KG_M3,
     visco_cf: float = 1.0,
 ) -> List[float]:
     values: List[float] = []
@@ -1044,7 +988,7 @@ def plot_family_metric(
     q_req: Optional[float] = None,
     h_req: Optional[float] = None,
     sys_curve: Optional[SystemCurve] = None,
-    density: float = 1000.0,
+    density: float = WATER_DENSITY_KG_M3,
     visco_cf: float = 1.0,
     black_curves: bool = False,
     smooth_curves: bool = False,
@@ -1197,7 +1141,7 @@ def render_characteristic_curves_point(
     q_req: Optional[float] = None,
     h_req: Optional[float] = None,
     sys_curve: Optional[SystemCurve] = None,
-    density: float = 1000.0,
+    density: float = WATER_DENSITY_KG_M3,
     visco_cf: float = 1.0,
     values_at_point: Optional[Dict[str, float]] = None,
 ) -> None:
@@ -1286,7 +1230,7 @@ def render_manual_interactive_curves(
     show_all_diameters: bool,
     selected_curve_obj=None,
     selected_real_diam: Optional[float] = None,
-    density: float = 1000.0,
+    density: float = WATER_DENSITY_KG_M3,
     visco_cf: float = 1.0,
     model_key: str = "",
 ) -> None:
@@ -1435,137 +1379,6 @@ def family_curve_summary_table(fam: Dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def sanitize_filename(value: str) -> str:
-    name = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(value).strip())
-    return name.strip("_") or "modelo"
-
-
-def family_curve_raw_data_df(fam: Dict) -> pd.DataFrame:
-    rows = []
-    for curve in fam["curvas"]:
-        for point in curve.puntos:
-            rows.append(
-                {
-                    "Serie": fam["serie_display"],
-                    "Marca": fam["marca"],
-                    "Modelo": fam["modelo"],
-                    "RPM": fam["rpm"],
-                    "Polos": fam["polos"],
-                    "Diametro_mm": curve.diam,
-                    "Q_m3/h": point.get("Q", np.nan),
-                    "H_m": point.get("H", np.nan),
-                    "pot_kw": point.get("P", np.nan),
-                    "h_%": point.get("eta", np.nan),
-                    "NPSH_m": point.get("NPSH", np.nan),
-                }
-            )
-
-    if not rows:
-        return pd.DataFrame()
-
-    return pd.DataFrame(rows).sort_values(by=["Diametro_mm", "Q_m3/h"]).reset_index(drop=True)
-
-
-def render_curve_data_download(fam: Dict, key: str) -> None:
-    curve_data = family_curve_raw_data_df(fam)
-    if curve_data.empty:
-        return
-
-    csv_data = curve_data.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig")
-    file_name = f"datos_curva_{sanitize_filename(fam['serie_display'])}_{sanitize_filename(fam['modelo'])}.csv"
-
-    st.download_button(
-        label="Descargar datos de la curva del modelo",
-        data=csv_data,
-        file_name=file_name,
-        mime="text/csv",
-        key=key,
-        use_container_width=True,
-    )
-
-
-def selected_diameter_curve_data_df(
-    fam: Dict,
-    curve_obj,
-    selected_diam: Optional[float],
-    density: float = 1000.0,
-    visco_cf: float = 1.0,
-    n_points: int = 420,
-) -> pd.DataFrame:
-    if curve_obj is None:
-        return pd.DataFrame()
-
-    q_min = float(getattr(curve_obj, "q_min", 0.0))
-    q_max = float(getattr(curve_obj, "q_max", q_min))
-
-    if q_max <= q_min:
-        q_values = np.array([q_min], dtype=float)
-    else:
-        q_values = np.linspace(q_min, q_max, n_points)
-
-    if selected_diam is not None and not pd.isna(selected_diam):
-        diam = float(selected_diam)
-    else:
-        diam = float(getattr(curve_obj, "diam", np.nan))
-
-    rows = []
-    for q in q_values:
-        q_float = float(q)
-        rows.append(
-            {
-                "Serie": fam["serie_display"],
-                "Marca": fam["marca"],
-                "Modelo": fam["modelo"],
-                "RPM": fam["rpm"],
-                "Polos": fam["polos"],
-                "Diametro_mm": diam,
-                "Q_m3/h": q_float,
-                "H_m": curve_obj.get_h(q_float),
-                "pot_kw": curve_obj.get_power(q_float, density=density, viscosity_cf=visco_cf),
-                "h_%": curve_obj.get_eta(q_float) * visco_cf,
-                "NPSH_m": curve_obj.get_npshr(q_float),
-            }
-        )
-
-    return pd.DataFrame(rows)
-
-
-def render_selected_diameter_data_download(
-    fam: Dict,
-    curve_obj,
-    selected_diam: Optional[float],
-    key: str,
-    density: float = 1000.0,
-    visco_cf: float = 1.0,
-) -> None:
-    curve_data = selected_diameter_curve_data_df(
-        fam=fam,
-        curve_obj=curve_obj,
-        selected_diam=selected_diam,
-        density=density,
-        visco_cf=visco_cf,
-    )
-    if curve_data.empty:
-        return
-
-    diam_value = curve_data["Diametro_mm"].iloc[0]
-    diam_txt = f"{float(diam_value):.2f}".rstrip("0").rstrip(".")
-    csv_data = curve_data.to_csv(index=False, sep=";", decimal=".").encode("utf-8-sig")
-    file_name = (
-        f"datos_curva_{sanitize_filename(fam['serie_display'])}_"
-        f"{sanitize_filename(fam['modelo'])}_D{sanitize_filename(diam_txt)}mm.csv"
-    )
-
-    st.download_button(
-        label="Descargar datos del diámetro seleccionado",
-        data=csv_data,
-        file_name=file_name,
-        mime="text/csv",
-        key=key,
-        use_container_width=True,
-    )
-
-
 # ==============================
 # Vista selección por punto
 # ==============================
@@ -1647,7 +1460,7 @@ def evaluate_families(
 def hydraulic_selection_view(families: List[Dict]) -> None:
     st.sidebar.header("1. Parámetros del Fluido")
     fluid_name = st.sidebar.text_input("Fluido", "Agua limpia")
-    densidad = st.sidebar.number_input("Densidad (kg/m³)", value=1000.0, step=10.0, format="%.2f")
+    densidad = st.sidebar.number_input("Densidad (kg/m³)", value=WATER_DENSITY_KG_M3, step=10.0, format="%.2f")
     viscosidad = st.sidebar.number_input("Viscosidad cinemática (cSt)", value=1.0, step=0.5, format="%.2f")
 
     st.sidebar.header("2. Punto de Operación")
@@ -1758,23 +1571,6 @@ def hydraulic_selection_view(families: List[Dict]) -> None:
         f"Q={fmt1(selected['Q Op. (m3/h)'])} | H={fmt1(selected['H Op. (m)'])}"
     )
     detail_cols[4].metric("NPSH", "OK" if selected["Status NPSH"] else "Revisar")
-
-    selected_diam_exact = float(getattr(trim_curve, "diam", selected["D_Impulsor (mm)"]))
-    download_cols = st.columns(2)
-    with download_cols[0]:
-        render_curve_data_download(
-            fam=fam,
-            key=f"download_hydraulic_{sanitize_filename(selected['Serie'])}_{sanitize_filename(selected['Modelo'])}_{selected_idx}",
-        )
-    with download_cols[1]:
-        render_selected_diameter_data_download(
-            fam=fam,
-            curve_obj=trim_curve,
-            selected_diam=selected_diam_exact,
-            density=densidad,
-            visco_cf=selected["_visco_cf"],
-            key=f"download_hydraulic_diam_{sanitize_filename(selected['Serie'])}_{sanitize_filename(selected['Modelo'])}_{selected_idx}",
-        )
 
     values_at_point = {
         "H": float(selected["H Op. (m)"]),
@@ -1993,29 +1789,12 @@ def manual_selection_view(families: List[Dict]) -> None:
         kpi_cols[4].metric("D mín. (mm)", fmt0(selected_row["D mín. (mm)"]))
         kpi_cols[5].metric("D máx. (mm)", fmt0(selected_row["D máx. (mm)"]))
 
-        download_cols = st.columns(2)
-        with download_cols[0]:
-            render_curve_data_download(
-                fam=fam,
-                key=f"download_manual_{sanitize_filename(str(selected_row['Serie']))}_{sanitize_filename(str(selected_row['Modelo']))}_{selection_index}",
-            )
-        if selected_curve_obj is not None:
-            with download_cols[1]:
-                render_selected_diameter_data_download(
-                    fam=fam,
-                    curve_obj=selected_curve_obj,
-                    selected_diam=selected_real_diam,
-                    density=1000.0,
-                    visco_cf=1.0,
-                    key=f"download_manual_diam_{sanitize_filename(str(selected_row['Serie']))}_{sanitize_filename(str(selected_row['Modelo']))}_{selection_index}",
-                )
-
         render_manual_interactive_curves(
             fam=fam,
             show_all_diameters=show_all_diameters,
             selected_curve_obj=selected_curve_obj,
             selected_real_diam=selected_real_diam,
-            density=1000.0,
+            density=WATER_DENSITY_KG_M3,
             visco_cf=1.0,
             model_key=f"{selected_row['Modelo']}_{fmt0(selected_row['Polos'])}",
         )
