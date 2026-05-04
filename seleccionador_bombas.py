@@ -15,6 +15,8 @@ from scipy.optimize import brentq, curve_fit
 # Configuración general
 # ==============================
 NPSH_MARGIN_M = 0.5
+WATER_DENSITY_KG_M3 = 998.0
+APP_CALC_VERSION = "p2_density_998_v1"
 VALID_USERNAME = st.secrets["auth"]["username"]
 VALID_PASSWORD = st.secrets["auth"]["password"]
 APP_SUBTITLE = "Series N-NP-N(V)"
@@ -336,9 +338,19 @@ class PumpCurveBase:
         q_eval = float(np.clip(q, self.unique_q[0], self.unique_q[-1]))
         return float(self.interp_npsh(q_eval))
 
-    def get_power(self, q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
+    def get_power(self, q: float, density: float = WATER_DENSITY_KG_M3, viscosity_cf: float = 1.0) -> float:
         if self.has_power_poly and self.popt_p is not None:
-            return max(0.0, float(poly2(np.array([q]), *self.popt_p)[0]))
+            p2_base_kw = max(0.0, float(poly2(np.array([q]), *self.popt_p)[0]))
+
+            density_value = safe_float(density, WATER_DENSITY_KG_M3)
+            if np.isnan(density_value) or density_value <= 0:
+                density_value = WATER_DENSITY_KG_M3
+
+            if abs(density_value - WATER_DENSITY_KG_M3) <= 1e-9:
+                return p2_base_kw
+
+            density_factor = density_value / WATER_DENSITY_KG_M3
+            return max(0.0, p2_base_kw * density_factor)
         return 0.0
 
 
@@ -362,11 +374,11 @@ class TrimmedCurve:
         q_base = q / self.ratio
         return self.base.get_npshr(q_base) * (self.ratio ** 2)
 
-    def get_power(self, q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
+    def get_power(self, q: float, density: float = WATER_DENSITY_KG_M3, viscosity_cf: float = 1.0) -> float:
         q_base = q / self.ratio
         return max(0.0, (self.ratio ** 3) * self.base.get_power(q_base, density=density, viscosity_cf=viscosity_cf))
 
-    def get_max_power(self, end_q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
+    def get_max_power(self, end_q: float, density: float = WATER_DENSITY_KG_M3, viscosity_cf: float = 1.0) -> float:
         qq = np.linspace(max(0.1, 0.02 * end_q), max(end_q, 0.1), 120)
         powers = [self.get_power(qi, density=density, viscosity_cf=viscosity_cf) for qi in qq]
         return float(max(powers)) if powers else 0.0
@@ -461,13 +473,13 @@ class InterpolatedDiameterCurve:
         npsh_high = self.curve_high.get_npshr(q)
         return self._blend(npsh_low, npsh_high)
 
-    def get_power(self, q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
+    def get_power(self, q: float, density: float = WATER_DENSITY_KG_M3, viscosity_cf: float = 1.0) -> float:
         return self._blend(
             self.curve_low.get_power(q, density=density, viscosity_cf=viscosity_cf),
             self.curve_high.get_power(q, density=density, viscosity_cf=viscosity_cf),
         )
 
-    def get_max_power(self, end_q: float, density: float = 1000.0, viscosity_cf: float = 1.0) -> float:
+    def get_max_power(self, end_q: float, density: float = WATER_DENSITY_KG_M3, viscosity_cf: float = 1.0) -> float:
         qq = np.linspace(max(0.1, self.q_min), max(end_q, 0.1), 120)
         powers = [self.get_power(qi, density=density, viscosity_cf=viscosity_cf) for qi in qq]
         return float(max(powers)) if powers else 0.0
@@ -769,6 +781,10 @@ def init_session_state() -> None:
         if key not in st.session_state:
             st.session_state[key] = value
 
+    if st.session_state.get("calc_version") != APP_CALC_VERSION:
+        st.session_state.loaded_families = None
+        st.session_state.calc_version = APP_CALC_VERSION
+
 
 init_session_state()
 
@@ -985,7 +1001,7 @@ def curve_values(
     curve_obj,
     metric: str,
     q_values: np.ndarray,
-    density: float = 1000.0,
+    density: float = WATER_DENSITY_KG_M3,
     visco_cf: float = 1.0,
 ) -> List[float]:
     values: List[float] = []
@@ -1044,7 +1060,7 @@ def plot_family_metric(
     q_req: Optional[float] = None,
     h_req: Optional[float] = None,
     sys_curve: Optional[SystemCurve] = None,
-    density: float = 1000.0,
+    density: float = WATER_DENSITY_KG_M3,
     visco_cf: float = 1.0,
     black_curves: bool = False,
     smooth_curves: bool = False,
@@ -1197,7 +1213,7 @@ def render_characteristic_curves_point(
     q_req: Optional[float] = None,
     h_req: Optional[float] = None,
     sys_curve: Optional[SystemCurve] = None,
-    density: float = 1000.0,
+    density: float = WATER_DENSITY_KG_M3,
     visco_cf: float = 1.0,
     values_at_point: Optional[Dict[str, float]] = None,
 ) -> None:
@@ -1286,7 +1302,7 @@ def render_manual_interactive_curves(
     show_all_diameters: bool,
     selected_curve_obj=None,
     selected_real_diam: Optional[float] = None,
-    density: float = 1000.0,
+    density: float = WATER_DENSITY_KG_M3,
     visco_cf: float = 1.0,
     model_key: str = "",
 ) -> None:
@@ -1488,7 +1504,7 @@ def selected_diameter_curve_data_df(
     fam: Dict,
     curve_obj,
     selected_diam: Optional[float],
-    density: float = 1000.0,
+    density: float = WATER_DENSITY_KG_M3,
     visco_cf: float = 1.0,
     n_points: int = 420,
 ) -> pd.DataFrame:
@@ -1535,7 +1551,7 @@ def render_selected_diameter_data_download(
     curve_obj,
     selected_diam: Optional[float],
     key: str,
-    density: float = 1000.0,
+    density: float = WATER_DENSITY_KG_M3,
     visco_cf: float = 1.0,
 ) -> None:
     curve_data = selected_diameter_curve_data_df(
@@ -1647,7 +1663,7 @@ def evaluate_families(
 def hydraulic_selection_view(families: List[Dict]) -> None:
     st.sidebar.header("1. Parámetros del Fluido")
     fluid_name = st.sidebar.text_input("Fluido", "Agua limpia")
-    densidad = st.sidebar.number_input("Densidad (kg/m³)", value=1000.0, step=10.0, format="%.2f")
+    densidad = st.sidebar.number_input("Densidad (kg/m³)", value=WATER_DENSITY_KG_M3, step=10.0, format="%.2f")
     viscosidad = st.sidebar.number_input("Viscosidad cinemática (cSt)", value=1.0, step=0.5, format="%.2f")
 
     st.sidebar.header("2. Punto de Operación")
@@ -2005,7 +2021,7 @@ def manual_selection_view(families: List[Dict]) -> None:
                     fam=fam,
                     curve_obj=selected_curve_obj,
                     selected_diam=selected_real_diam,
-                    density=1000.0,
+                    density=WATER_DENSITY_KG_M3,
                     visco_cf=1.0,
                     key=f"download_manual_diam_{sanitize_filename(str(selected_row['Serie']))}_{sanitize_filename(str(selected_row['Modelo']))}_{selection_index}",
                 )
@@ -2015,7 +2031,7 @@ def manual_selection_view(families: List[Dict]) -> None:
             show_all_diameters=show_all_diameters,
             selected_curve_obj=selected_curve_obj,
             selected_real_diam=selected_real_diam,
-            density=1000.0,
+            density=WATER_DENSITY_KG_M3,
             visco_cf=1.0,
             model_key=f"{selected_row['Modelo']}_{fmt0(selected_row['Polos'])}",
         )
