@@ -15,8 +15,8 @@ from scipy.optimize import brentq, curve_fit
 # Configuración general
 # ==============================
 NPSH_MARGIN_M = 0.5
-VALID_USERNAME = "Diego"
-VALID_PASSWORD = "Vogt1234"
+VALID_USERNAME = st.secrets["auth"]["username"]
+VALID_PASSWORD = st.secrets["auth"]["password"]
 APP_SUBTITLE = "Series N-NP-N(V)"
 APP_TITLE = "Seleccionador Bombas Normalizadas"
 BASE_DATABASE_FILENAME = "Base_Datos_wilo_sempa_grundfos.csv"
