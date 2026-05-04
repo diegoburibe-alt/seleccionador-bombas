@@ -400,39 +400,64 @@ class InterpolatedDiameterCurve:
     def _blend(self, y1: float, y2: float) -> float:
         return float((1.0 - self.lam) * y1 + self.lam * y2)
 
-    def _curve_low_eta_with_tail_similarity(self, q: float) -> float:
-        q_low_max = float(self.curve_low.unique_q[-1])
-        if q <= q_low_max:
-            return self.curve_low.get_eta(q)
+    def _tail_equation_value(self, curve: PumpCurveBase, q: float, metric: str) -> float:
+        q_data = np.array(curve.unique_q, dtype=float)
+        q_end = float(q_data[-1])
 
-        ratio_low_high = self.d1 / self.d2
-        q_ref = q / ratio_low_high
-        q_ref = min(q_ref, float(self.curve_high.unique_q[-1]))
-        eta_est = self.curve_high.get_eta(q_ref)
-        return float(max(0.0, min(100.0, eta_est)))
+        if metric == "ETA":
+            if q <= q_end:
+                return curve.get_eta(q)
+            y_data = np.array(curve.eta_values, dtype=float)
+            y_end = float(curve.get_eta(q_end))
+        elif metric == "NPSH":
+            if q <= q_end:
+                return curve.get_npshr(q)
+            y_data = np.array(curve.npsh_values, dtype=float)
+            y_end = float(curve.get_npshr(q_end))
+        else:
+            return 0.0
 
-    def _curve_low_npsh_with_tail_similarity(self, q: float) -> float:
-        q_low_max = float(self.curve_low.unique_q[-1])
-        if q <= q_low_max:
-            return self.curve_low.get_npshr(q)
+        n_tail = min(10, len(q_data))
+        if n_tail < 2:
+            return y_end
 
-        ratio_low_high = self.d1 / self.d2
-        q_ref = q / ratio_low_high
-        q_ref = min(q_ref, float(self.curve_high.unique_q[-1]))
-        npsh_est = self.curve_high.get_npshr(q_ref) * (ratio_low_high ** 2)
-        npsh_last = self.curve_low.get_npshr(q_low_max)
-        return float(max(npsh_last, npsh_est))
+        x_tail = q_data[-n_tail:] - q_end
+        y_tail = y_data[-n_tail:]
+        degree = 2 if n_tail >= 4 else 1
+
+        try:
+            coeffs = np.polyfit(x_tail, y_tail, degree)
+            x_eval = float(q) - q_end
+            y_poly = float(np.polyval(coeffs, x_eval))
+            y_poly_at_end = float(np.polyval(coeffs, 0.0))
+            y_est = y_end + (y_poly - y_poly_at_end)
+        except Exception:
+            y_est = y_end
+
+        if metric == "ETA":
+            return float(max(0.0, min(100.0, y_est)))
+
+        if metric == "NPSH":
+            return float(max(0.0, y_est))
+
+        return float(y_est)
 
     def get_h(self, q: float) -> float:
         return self._blend(self.curve_low.get_h(q), self.curve_high.get_h(q))
 
     def get_eta(self, q: float) -> float:
-        eta_low = self._curve_low_eta_with_tail_similarity(q)
+        if q > float(self.curve_low.unique_q[-1]):
+            eta_low = self._tail_equation_value(self.curve_low, q, "ETA")
+        else:
+            eta_low = self.curve_low.get_eta(q)
         eta_high = self.curve_high.get_eta(q)
         return self._blend(eta_low, eta_high)
 
     def get_npshr(self, q: float) -> float:
-        npsh_low = self._curve_low_npsh_with_tail_similarity(q)
+        if q > float(self.curve_low.unique_q[-1]):
+            npsh_low = self._tail_equation_value(self.curve_low, q, "NPSH")
+        else:
+            npsh_low = self.curve_low.get_npshr(q)
         npsh_high = self.curve_high.get_npshr(q)
         return self._blend(npsh_low, npsh_high)
 
